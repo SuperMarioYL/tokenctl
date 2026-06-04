@@ -3,8 +3,6 @@ package budget
 import (
 	"testing"
 	"time"
-
-	"github.com/supermario-leo/tokenctl/internal/config"
 )
 
 // preemptScenario is the shared fixture for preempt tests: a 1000-token root

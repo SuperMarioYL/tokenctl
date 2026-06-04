@@ -16,7 +16,7 @@ func newTestTree(t *testing.T, root *config.GroupConfig) *Tree {
 	if err != nil {
 		t.Fatalf("NewTree: %v", err)
 	}
-	tr.arb.stop()
+	tr.arb.shutdown()
 	t.Cleanup(func() { _ = tr.Close() })
 	return tr
 }

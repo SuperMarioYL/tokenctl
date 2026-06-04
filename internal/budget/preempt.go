@@ -72,11 +72,11 @@ func (a *arbiter) start() {
 	go a.loop()
 }
 
-// stop signals the arbiter loop and waits for it to drain. Idempotent: a
+// shutdown signals the arbiter loop and waits for it to drain. Idempotent: a
 // second Close from main() after a SIGINT-triggered first Close is a
 // no-op. Guarded by recover() so the double-close on the channel doesn't
 // panic.
-func (a *arbiter) stop() {
+func (a *arbiter) shutdown() {
 	defer func() { _ = recover() }()
 	close(a.stop)
 	<-a.done
@@ -163,7 +163,7 @@ func (a *arbiter) consider(parent *node) {
 		// Is this sibling using more than its fair weighted share?
 		cc, _ := c.snapshotConsumed()
 		share := float64(c.weight) / float64(max1(totalWeight))
-		usedFrac := float64(cc) / float64(max1(pc))
+		usedFrac := float64(cc) / float64(max1(int(pc)))
 		if usedFrac <= share*1.05 {
 			// Within its fair share — leave it alone.
 			continue

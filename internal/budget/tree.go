@@ -318,7 +318,7 @@ func (t *Tree) collectLeaves(n *node) {
 // call multiple times.
 func (t *Tree) Close() error {
 	if t.arb != nil {
-		t.arb.stop()
+		t.arb.shutdown()
 	}
 	if t.state != nil {
 		t.flushAll()
