@@ -1,0 +1,33 @@
+# Build artefacts
+/tokenctl
+/dist/
+/bin/
+*.exe
+*.test
+*.out
+*.prof
+
+# Local state
+*.db
+*.boltdb
+tokenctl.yaml
+!configs/tokenctl.example.yaml
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Agent harness — never publish
+.claude/
+CLAUDE.md
+.build_metadata.yaml
+.build_metadata.slices.yaml
+.builder_prompt_*.md
+.build_orchestrator.sh
+.orchestrator.log
+.spawn.*
+.result_*.json
+.err_*

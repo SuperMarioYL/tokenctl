@@ -1,0 +1,106 @@
+# tokenctl configuration — committed example.
+#
+# Copy to ./tokenctl.yaml, edit budgets + api_keys, then run:
+#
+#     tokenctl up -c ./tokenctl.yaml
+#
+# The schema below mirrors the `tokenctl init --org <name>` output, with extra
+# comments. See docs/quickstart.md for the 10-minute walkthrough.
+
+version: v0.1
+
+# HTTP listener for inbound LLM traffic. Use ":8080" for dev; bind to the
+# internal address (e.g. "10.0.1.4:8080") in production.
+listen: ":8080"
+
+# Optional TLS termination. Leave empty for plain HTTP behind a load balancer.
+# tls:
+#   cert_file: /etc/tokenctl/tls.crt
+#   key_file:  /etc/tokenctl/tls.key
+
+store:
+  # Embedded BoltDB file. Relative paths resolve against the config's
+  # directory. Holds windowed consumed counters + the append-only audit log.
+  path: tokenctl.db
+
+metrics:
+  listen: ":9090"
+  path:   /metrics
+
+# Optional org-level wallet. When set, the arbiter enforces
+# sum(provider_consumed) <= wallet.budget.tokens across the window. Use this
+# to cap total spend across Claude + OpenAI + Bedrock on a shared bill.
+wallet:
+  budget:
+    tokens: 20000000          # 20M tokens
+    window: 24h
+    soft_throttle_at: 0.8     # FIFO-delay above 80%
+
+# Upstream providers fronted by the proxy. Names must be one of:
+#   claude   -> Anthropic Messages API
+#   openai   -> OpenAI Chat Completions
+#   bedrock  -> AWS Bedrock Converse (requires region)
+providers:
+  - name: claude
+    upstream: https://api.anthropic.com
+  - name: openai
+    upstream: https://api.openai.com
+  # - name: bedrock
+  #   upstream: https://bedrock-runtime.us-east-1.amazonaws.com
+  #   region:   us-east-1
+
+# Hierarchical TokenGroup tree (org -> team -> dev). Each node carries a
+# weight (relative share of parent slack) and an optional budget (hard
+# ceiling per window). Leaves are the only nodes an api_key may bind to.
+tree:
+  name: acme
+  weight: 100
+  budget: { tokens: 20000000, window: 24h, soft_throttle_at: 0.8 }
+  children:
+    - name: team-platform
+      weight: 50
+      budget: { tokens: 10000000, window: 24h, soft_throttle_at: 0.8 }
+      children:
+        - name: alice
+          weight: 50
+          budget: { tokens: 5000000, window: 24h, soft_throttle_at: 0.8 }
+        - name: bob
+          weight: 50
+          budget: { tokens: 5000000, window: 24h, soft_throttle_at: 0.8 }
+    - name: team-product
+      weight: 30
+      budget: { tokens: 6000000, window: 24h, soft_throttle_at: 0.8 }
+      children:
+        - name: carol
+          weight: 50
+          budget: { tokens: 3000000, window: 24h, soft_throttle_at: 0.8 }
+        - name: dave
+          weight: 50
+          budget: { tokens: 3000000, window: 24h, soft_throttle_at: 0.8 }
+    - name: team-research
+      weight: 20
+      budget: { tokens: 4000000, window: 24h, soft_throttle_at: 0.8 }
+      children:
+        - name: erin
+          weight: 50
+          budget: { tokens: 2000000, window: 24h, soft_throttle_at: 0.8 }
+        - name: frank
+          weight: 50
+          budget: { tokens: 2000000, window: 24h, soft_throttle_at: 0.8 }
+
+# Inbound API keys mapped to leaf paths. The proxy reads the Authorization
+# header (Bearer <key>) and pins the request to the bound leaf. Replace the
+# placeholders below with your real keys before going live.
+api_keys:
+  - key: replace-me-alice
+    group: acme.team-platform.alice
+  - key: replace-me-bob
+    group: acme.team-platform.bob
+  - key: replace-me-carol
+    group: acme.team-product.carol
+  - key: replace-me-dave
+    group: acme.team-product.dave
+  - key: replace-me-erin
+    group: acme.team-research.erin
+  - key: replace-me-frank
+    group: acme.team-research.frank
