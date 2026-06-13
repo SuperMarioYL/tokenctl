@@ -7,7 +7,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="license"/></a>
   <img src="https://img.shields.io/badge/release-v0.1.0--dev-orange?style=flat-square" alt="release"/>
-  <img src="https://img.shields.io/github/actions/workflow/status/supermario-leo/tokenctl/ci.yml?style=flat-square" alt="ci"/>
+  <img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/tokenctl/ci.yml?style=flat-square" alt="ci"/>
   <img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white&style=flat-square" alt="go"/>
   <img src="https://img.shields.io/badge/Coding%20Agent-governable-8b5cf6?style=flat-square" alt="Coding Agent"/>
   <img src="https://img.shields.io/badge/Agent-arbitrated-14b8a6?style=flat-square" alt="Agent"/>
@@ -40,7 +40,7 @@ ChromeDevTools just shipped [`chrome-devtools-mcp`](https://github.com/ChromeDev
 ## Quickstart (10 minutes)
 
 ```bash
-git clone https://github.com/supermario-leo/tokenctl && cd tokenctl
+git clone https://github.com/SuperMarioYL/tokenctl && cd tokenctl
 go build -o tokenctl ./cmd/tokenctl
 ./tokenctl init --org acme && ./tokenctl up -c tokenctl.yaml
 ```
@@ -148,7 +148,7 @@ Anchor: Simon Willison's \$1,500 per-developer cap — same dollar figure, but i
 
 Apache-2.0. See [LICENSE](./LICENSE).
 
-File bugs and ideas at [GitHub Issues](https://github.com/supermario-leo/tokenctl/issues); please open one before sending a PR so we can align on direction.
+File bugs and ideas at [GitHub Issues](https://github.com/SuperMarioYL/tokenctl/issues); please open one before sending a PR so we can align on direction.
 
 After pushing the repo, set GitHub topics so the right people find it:
 
@@ -162,9 +162,5 @@ gh repo edit --add-topic mcp --add-topic agent --add-topic claude-code --add-top
 tokenctl — the Coding Agent governor your platform team can actually install.
 cgroups-style hierarchical budgets, real-time SSE attribution, mid-stream
 preemption. Single Go binary. Apache-2.0.
-👉 https://github.com/supermario-leo/tokenctl
+👉 https://github.com/SuperMarioYL/tokenctl
 ```
-
----
-
-<sub>Built from a hash-locked plan by <a href="https://github.com/supermario-leo/ai-radar">ai-radar</a> — signal ingest → candidate mining → plan-lock → automated build.</sub>

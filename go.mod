@@ -1,4 +1,4 @@
-module github.com/supermario-leo/tokenctl
+module github.com/SuperMarioYL/tokenctl
 
 go 1.24
 

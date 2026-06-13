@@ -17,7 +17,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/supermario-leo/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
 )
 
 // Provider is the contract the proxy depends on per upstream LLM API.

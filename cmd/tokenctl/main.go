@@ -25,10 +25,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/supermario-leo/tokenctl/internal/budget"
-	"github.com/supermario-leo/tokenctl/internal/config"
-	"github.com/supermario-leo/tokenctl/internal/proxy"
-	"github.com/supermario-leo/tokenctl/internal/store"
+	"github.com/SuperMarioYL/tokenctl/internal/budget"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/proxy"
+	"github.com/SuperMarioYL/tokenctl/internal/store"
 )
 
 // Version is the binary's release tag. Overridable at link time:

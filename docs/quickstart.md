@@ -16,7 +16,7 @@ Target time: **under 10 minutes**, no Docker, no cluster, no message queue.
 ## 2. Build the binary
 
 ```bash
-git clone https://github.com/supermario-leo/tokenctl
+git clone https://github.com/SuperMarioYL/tokenctl
 cd tokenctl
 go build -o tokenctl ./cmd/tokenctl
 ./tokenctl version

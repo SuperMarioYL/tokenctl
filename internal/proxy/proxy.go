@@ -39,8 +39,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/supermario-leo/tokenctl/internal/config"
-	"github.com/supermario-leo/tokenctl/internal/providers"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/providers"
 )
 
 // Tree is the contract the proxy needs from the runtime budget tree.

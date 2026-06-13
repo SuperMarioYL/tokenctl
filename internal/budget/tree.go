@@ -32,8 +32,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/supermario-leo/tokenctl/internal/config"
-	"github.com/supermario-leo/tokenctl/internal/proxy"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/proxy"
 )
 
 // Tree.Admit error sentinels — re-exported from proxy so callers in this

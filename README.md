@@ -7,7 +7,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="license"/></a>
   <img src="https://img.shields.io/badge/release-v0.1.0--dev-orange?style=flat-square" alt="release"/>
-  <img src="https://img.shields.io/github/actions/workflow/status/supermario-leo/tokenctl/ci.yml?style=flat-square" alt="ci"/>
+  <img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/tokenctl/ci.yml?style=flat-square" alt="ci"/>
   <img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white&style=flat-square" alt="go"/>
   <img src="https://img.shields.io/badge/Claude%20Code-ready-8b5cf6?style=flat-square" alt="Claude Code"/>
   <img src="https://img.shields.io/badge/Agent-governable-14b8a6?style=flat-square" alt="Agent"/>
@@ -40,7 +40,7 @@ ChromeDevTools 团队最近开源了 [`chrome-devtools-mcp`](https://github.com/
 ## 快速上手（10 分钟）
 
 ```bash
-git clone https://github.com/supermario-leo/tokenctl && cd tokenctl
+git clone https://github.com/SuperMarioYL/tokenctl && cd tokenctl
 go build -o tokenctl ./cmd/tokenctl
 ./tokenctl init --org acme && ./tokenctl up -c tokenctl.yaml
 ```
@@ -144,7 +144,7 @@ OSS 二进制（Apache-2.0）永久免费。**托管控制面（Hosted Control P
 
 Apache-2.0。详见 [LICENSE](./LICENSE)。
 
-提 Bug 或想法请在 [GitHub Issues](https://github.com/supermario-leo/tokenctl/issues) 开一张；PR 之前烦请先开一个 Issue 对齐方向。中文沟通完全 OK。
+提 Bug 或想法请在 [GitHub Issues](https://github.com/SuperMarioYL/tokenctl/issues) 开一张；PR 之前烦请先开一个 Issue 对齐方向。中文沟通完全 OK。
 
 推送代码后，记得给仓库加上 topic 方便被搜索到：
 
@@ -158,9 +158,5 @@ gh repo edit --add-topic mcp --add-topic agent --add-topic claude-code --add-top
 tokenctl —— 给 Claude Code 装上 cgroups。
 一份 YAML 描述 org→team→dev 预算树，反代 Claude/OpenAI/Bedrock，
 越线 429，缺粮抢占。一个 Go 二进制，工程团队真能装上。
-👉 https://github.com/supermario-leo/tokenctl
+👉 https://github.com/SuperMarioYL/tokenctl
 ```
-
----
-
-<sub>本仓库由 <a href="https://github.com/supermario-leo/ai-radar">ai-radar</a> 流水线孵化 —— 信号采集 → 候选挖掘 → 计划锁定 → 全自动 build。</sub>

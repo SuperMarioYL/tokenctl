@@ -31,7 +31,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/supermario-leo/tokenctl/internal/budget"
+	"github.com/SuperMarioYL/tokenctl/internal/budget"
 )
 
 const (

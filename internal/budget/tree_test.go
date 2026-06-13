@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/supermario-leo/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
 )
 
 // newTestTree builds a Tree and immediately stops the background arbiter so

@@ -24,5 +24,5 @@ First public cut. Three milestones land together as the v0.1 control plane.
 - Bilingual README (简体中文 primary, English sibling), Apache-2.0 license, GitHub
   Actions CI.
 
-[Unreleased]: https://github.com/supermario-leo/tokenctl/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/supermario-leo/tokenctl/releases/tag/v0.1.0
+[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/SuperMarioYL/tokenctl/releases/tag/v0.1.0

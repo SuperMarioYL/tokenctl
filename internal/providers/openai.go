@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/supermario-leo/tokenctl/internal/config"
+	"github.com/SuperMarioYL/tokenctl/internal/config"
 )
 
 func init() {
