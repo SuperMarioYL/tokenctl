@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="license"/></a>
-  <img src="https://img.shields.io/badge/release-v0.1.0--dev-orange?style=flat-square" alt="release"/>
+  <a href="https://github.com/SuperMarioYL/tokenctl/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/tokenctl?style=flat-square&color=8b5cf6" alt="release"/></a>
   <img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/tokenctl/ci.yml?style=flat-square" alt="ci"/>
   <img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white&style=flat-square" alt="go"/>
   <img src="https://img.shields.io/badge/Claude%20Code-ready-8b5cf6?style=flat-square" alt="Claude Code"/>
@@ -20,8 +20,9 @@
 ## 目录
 
 - [为什么需要它](#为什么需要它)
-- [快速上手（10 分钟）](#快速上手10-分钟)
 - [架构概览](#架构概览)
+- [快速上手（10 分钟）](#快速上手10-分钟)
+- [演示](#演示)
 - [配置说明](#配置说明)
 - [对比 chrome-devtools-mcp](#对比-chrome-devtools-mcp)
 - [付费 / Pricing](#付费--pricing)
@@ -36,6 +37,26 @@
 ChromeDevTools 团队最近开源了 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)，让 Agent 直接驱动浏览器：调试器更强了，token 烧得也更快了。HKUDS 这类组织也在发布越来越多面向生产的 Agent 框架。当 **Agent** 成为团队里事实上的「无监督新员工」时，再没有 OS 级别的资源仲裁器就是失职——这就是 tokenctl 存在的理由：**一个工程团队真正能装上的 AI 预算控制器**。
 
 > 灵感来源：Simon Willison 的「每月 \$1,500 Claude Code 预算」周记。我们写了那篇文章描述的「执行层」。
+
+## <img src="https://api.iconify.design/tabler/topology-star-3.svg?color=%235e5ce6" width="20" height="20" align="center" /> 架构概览
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="Coding Agent 流量进入一个 Go 二进制——proxy 反代请求并逐 token 计量 SSE 流，budget 树按 org→team→dev 配额准入、软节流、硬拒绝并抢占，再转发给 Claude/OpenAI/Bedrock；BoltDB 持久化计数与审计日志，Prometheus 与 tokenctl top 暴露实时状态">
+  </picture>
+</p>
+
+每个 Coding Agent 请求都打到同一个静态 Go 二进制上。`internal/proxy` 反代请求并逐 token 计量流式 SSE 响应；`internal/budget` 跑 `org → team → dev` 仲裁器，负责准入、超过 80% 软节流、超过 100% 硬拒绝（`429 + X-TokenCtl-Reason`），并在高权重兄弟节点缺粮时抢占在飞的低权重请求。计量增量回流到每个 leaf，`internal/store` 用 BoltDB 持久化窗口内计数与 append-only 审计日志，Prometheus `/metrics` 与 `tokenctl top` 暴露实时消耗。
+
+整个 v0.1 是一个二进制、三个内部模块：
+
+| 模块 | 职责 |
+| --- | --- |
+| `internal/proxy` | TLS 反代 Claude / OpenAI / Bedrock，解析 SSE 流增量计 token |
+| `internal/budget` | `TokenGroup` 递归树 + 单个仲裁 goroutine，负责准入 / 节流 / 抢占 |
+| `internal/store` | 内嵌 BoltDB，持久化窗口内 `consumed` 计数 + append-only 审计日志 |
 
 ## 快速上手（10 分钟）
 
@@ -69,17 +90,11 @@ acme.team-research                20      0           4.00M       ok (0%)
 
 </details>
 
-> 📼 30 秒 asciinema 演示即将发布（见 [`assets/demo.tape`](./assets/demo.tape) 的录制脚本）。
+## <img src="https://api.iconify.design/tabler/photo.svg?color=%235e5ce6" width="20" height="20" align="center" /> 演示
 
-## 架构概览
+![tokenctl demo](./assets/demo.gif)
 
-整个 v0.1 是一个二进制、三个内部模块：
-
-| 模块 | 职责 |
-| --- | --- |
-| `internal/proxy` | TLS 反代 Claude / OpenAI / Bedrock，解析 SSE 流增量计 token |
-| `internal/budget` | `TokenGroup` 递归树 + 单个仲裁 goroutine，负责准入 / 节流 / 抢占 |
-| `internal/store` | 内嵌 BoltDB，持久化窗口内 `consumed` 计数 + append-only 审计日志 |
+构建二进制、生成示例预算树、启动反代，然后在 `tokenctl top` 里实时看到每个流式 token 被归账到正确的 `org → team → dev` leaf。录制脚本见 [`docs/demo.tape`](./docs/demo.tape)，由 CI [`.github/workflows/demo.yml`](./.github/workflows/demo.yml) 渲染。
 
 没有外部 DB、没有消息队列、没有第二个进程。一份 YAML，一个二进制，一个 BoltDB 文件。
 

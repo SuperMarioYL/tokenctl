@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="license"/></a>
-  <img src="https://img.shields.io/badge/release-v0.1.0--dev-orange?style=flat-square" alt="release"/>
+  <a href="https://github.com/SuperMarioYL/tokenctl/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/tokenctl?style=flat-square&color=8b5cf6" alt="release"/></a>
   <img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/tokenctl/ci.yml?style=flat-square" alt="ci"/>
   <img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white&style=flat-square" alt="go"/>
   <img src="https://img.shields.io/badge/Coding%20Agent-governable-8b5cf6?style=flat-square" alt="Coding Agent"/>
@@ -20,8 +20,9 @@
 ## Contents
 
 - [Why this exists](#why-this-exists)
+- [Architecture](#-architecture)
 - [Quickstart (10 minutes)](#quickstart-10-minutes)
-- [Architecture](#architecture)
+- [Demo](#-demo)
 - [Configuration](#configuration)
 - [vs chrome-devtools-mcp](#vs-chrome-devtools-mcp)
 - [Pricing](#pricing)
@@ -36,6 +37,26 @@ Platform / DevEx teams keep landing on the same problem: a CFO hands one enginee
 ChromeDevTools just shipped [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp), giving Coding Agents direct access to a real browser debugger — a great upgrade for the **Agent**, and an even faster way to burn tokens. Open-source orgs like [HKUDS](https://github.com/HKUDS) keep publishing more capable agent runtimes. When the Coding Agent has become the team's de-facto unsupervised junior engineer, the absence of an OS-level arbiter is a hole — and that hole is exactly what tokenctl plugs.
 
 > Anchor: Simon Willison's "\$1,500/month Claude Code cap" weeknote. tokenctl is the enforcement layer he described.
+
+## <img src="https://api.iconify.design/tabler/topology-star-3.svg?color=%235e5ce6" width="20" height="20" align="center" /> Architecture
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="Coding Agent traffic enters one Go binary — the proxy meters streamed tokens, the budget tree admits, throttles or preempts against an org→team→dev quota, then forwards to Claude/OpenAI/Bedrock; BoltDB persists counters and the audit log while Prometheus and tokenctl top expose live state">
+  </picture>
+</p>
+
+Every Coding Agent request hits one static Go binary. `internal/proxy` reverse-proxies the call and meters the streamed SSE response token-by-token; `internal/budget` runs the `org → team → dev` arbiter that admits, soft-throttles past 80%, hard-denies past 100% (`429 + X-TokenCtl-Reason`), and preempts low-weight in-flight requests when a higher-weight sibling needs headroom. Metered deltas flow back to each leaf, `internal/store` persists windowed counters plus an append-only audit log in BoltDB, and Prometheus `/metrics` + `tokenctl top` expose live burn.
+
+One binary, three internal packages — no external DB, no message queue, no second process:
+
+| Package | Responsibility |
+| --- | --- |
+| `internal/proxy` | TLS-terminating reverse proxy for Claude / OpenAI / Bedrock; parses SSE for incremental token attribution |
+| `internal/budget` | Recursive `TokenGroup` tree + arbiter goroutine; owns admit / throttle / preempt decisions |
+| `internal/store` | Embedded BoltDB; persists windowed `consumed` counters + append-only audit log |
 
 ## Quickstart (10 minutes)
 
@@ -75,17 +96,11 @@ acme.team-research                20      0           4.00M       ok (0%)
 
 </details>
 
-> 📼 30-second asciinema landing soon (see [`assets/demo.tape`](./assets/demo.tape) for the recording script).
+## <img src="https://api.iconify.design/tabler/photo.svg?color=%235e5ce6" width="20" height="20" align="center" /> Demo
 
-## Architecture
+![tokenctl demo](./assets/demo.gif)
 
-One binary, three internal packages — no external DB, no message queue, no second process:
-
-| Package | Responsibility |
-| --- | --- |
-| `internal/proxy` | TLS-terminating reverse proxy for Claude / OpenAI / Bedrock; parses SSE for incremental token attribution |
-| `internal/budget` | Recursive `TokenGroup` tree + arbiter goroutine; owns admit / throttle / preempt decisions |
-| `internal/store` | Embedded BoltDB; persists windowed `consumed` counters + append-only audit log |
+Build the binary, generate a sample tree, start the proxy, then watch `tokenctl top` attribute every streamed token to the right `org → team → dev` leaf in real time. The recording script lives in [`docs/demo.tape`](./docs/demo.tape) and renders in CI via [`.github/workflows/demo.yml`](./.github/workflows/demo.yml).
 
 ## Configuration
 

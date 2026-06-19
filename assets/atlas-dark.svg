@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 360" width="880" height="360"
+     font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+     role="img" aria-label="tokenctl architecture: Coding Agent traffic enters one Go binary — the proxy meters streamed tokens, the budget tree admits, throttles or preempts against an org-team-dev quota, then forwards to Claude/OpenAI/Bedrock; BoltDB persists counters and the audit log while Prometheus and tokenctl top expose live state">
+  <defs>
+    <marker id="ah-d" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5A5A66"/></marker>
+  </defs>
+  <rect x="0" y="0" width="880" height="360" fill="#1D1D1F"/>
+
+  <!-- single-binary frame -->
+  <rect x="160" y="28" width="540" height="252" rx="18" fill="none" stroke="#8985FF" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text x="180" y="50" font-size="13" font-weight="600" fill="#A8A4FF">one static Go binary — no external DB, no queue, no second process</text>
+
+  <!-- connectors -->
+  <g stroke="#3A3A44" stroke-width="1.6" fill="none">
+    <line x1="148" y1="168" x2="186" y2="168" marker-end="url(#ah-d)"/>
+    <line x1="356" y1="168" x2="394" y2="168" marker-end="url(#ah-d)"/>
+    <line x1="566" y1="168" x2="722" y2="168" marker-end="url(#ah-d)"/>
+  </g>
+  <!-- meter feedback: tokens stream back from upstream into the tree -->
+  <g stroke="#2DC79A" stroke-width="1.5" fill="none" stroke-dasharray="4 4">
+    <path d="M748 196 C 748 248, 480 248, 480 200" marker-end="url(#ah-d)"/>
+  </g>
+  <text x="500" y="263" font-size="11" font-weight="600" fill="#5BE0BC">SSE token deltas attributed back per leaf</text>
+  <!-- store persistence link -->
+  <g stroke="#3A3A44" stroke-width="1.5" fill="none">
+    <line x1="480" y1="280" x2="480" y2="306" marker-end="url(#ah-d)"/>
+  </g>
+
+  <!-- Coding Agent -->
+  <g>
+    <rect x="24" y="120" width="124" height="96" rx="15" fill="#4DA3FF" fill-opacity="0.16" stroke="#4DA3FF" stroke-width="1.5"/>
+    <text x="86" y="160" text-anchor="middle" font-size="14" font-weight="600" fill="#9FCBFF">Coding Agent</text>
+    <text x="86" y="180" text-anchor="middle" font-size="11" fill="#A1A1A8">Claude Code · Cursor</text>
+    <text x="86" y="195" text-anchor="middle" font-size="11" fill="#A1A1A8">Aider · Continue</text>
+  </g>
+
+  <!-- Proxy + Meter -->
+  <g>
+    <rect x="186" y="92" width="170" height="152" rx="15" fill="#4DA3FF" fill-opacity="0.16" stroke="#4DA3FF" stroke-width="1.5"/>
+    <text x="271" y="118" text-anchor="middle" font-size="14" font-weight="600" fill="#9FCBFF">internal/proxy</text>
+    <g font-size="11" fill="#D0D0D6">
+      <rect x="202" y="132" width="138" height="36" rx="9" fill="#4DA3FF" fill-opacity="0.12" stroke="#4DA3FF" stroke-width="1.1"/>
+      <text x="271" y="154" text-anchor="middle" font-weight="600" fill="#9FCBFF">reverse proxy + TLS</text>
+      <rect x="202" y="174" width="138" height="36" rx="9" fill="#4DA3FF" fill-opacity="0.12" stroke="#4DA3FF" stroke-width="1.1"/>
+      <text x="271" y="196" text-anchor="middle" font-weight="600" fill="#9FCBFF">SSE token meter</text>
+      <rect x="202" y="216" width="138" height="22" rx="7" fill="#4DA3FF" fill-opacity="0.09" stroke="#4DA3FF" stroke-width="1.0"/>
+      <text x="271" y="231" text-anchor="middle" fill="#A1A1A8">FlushInterval = -1</text>
+    </g>
+  </g>
+
+  <!-- Budget Tree / Arbiter -->
+  <g>
+    <rect x="394" y="92" width="172" height="152" rx="15" fill="#8985FF" fill-opacity="0.16" stroke="#8985FF" stroke-width="1.6"/>
+    <text x="480" y="118" text-anchor="middle" font-size="14" font-weight="700" fill="#A8A4FF">internal/budget</text>
+    <g font-size="11.5">
+      <rect x="410" y="132" width="140" height="26" rx="8" fill="#000000" fill-opacity="0.25" stroke="#8985FF" stroke-width="1.1"/>
+      <text x="421" y="149" fill="#E5E3FF"><tspan font-weight="700" fill="#A8A4FF">admit</tspan>  org→team→dev</text>
+      <rect x="410" y="164" width="140" height="26" rx="8" fill="#000000" fill-opacity="0.25" stroke="#8985FF" stroke-width="1.1"/>
+      <text x="421" y="181" fill="#E5E3FF"><tspan font-weight="700" fill="#A8A4FF">throttle</tspan>  ≥ 80%</text>
+      <rect x="410" y="196" width="140" height="26" rx="8" fill="#000000" fill-opacity="0.25" stroke="#8985FF" stroke-width="1.1"/>
+      <text x="421" y="213" fill="#E5E3FF"><tspan font-weight="700" fill="#A8A4FF">deny</tspan>  429 + reason</text>
+    </g>
+    <text x="480" y="237" text-anchor="middle" font-size="10.5" fill="#A1A1A8">weighted preemption + wallet arbiter</text>
+  </g>
+
+  <!-- Upstream providers -->
+  <g>
+    <rect x="722" y="92" width="134" height="152" rx="15" fill="#2DC79A" fill-opacity="0.10" stroke="#2DC79A" stroke-width="1.5"/>
+    <text x="789" y="118" text-anchor="middle" font-size="14" font-weight="600" fill="#5BE0BC">Upstream LLM</text>
+    <g font-size="12" font-weight="600">
+      <rect x="738" y="134" width="102" height="32" rx="8" fill="#2DC79A" fill-opacity="0.22" stroke="#2DC79A" stroke-width="1.1"/>
+      <text x="789" y="155" text-anchor="middle" fill="#5BE0BC">Claude</text>
+      <rect x="738" y="172" width="102" height="32" rx="8" fill="#2DC79A" fill-opacity="0.15" stroke="#2DC79A" stroke-width="1.1"/>
+      <text x="789" y="193" text-anchor="middle" fill="#5BE0BC">OpenAI</text>
+      <rect x="738" y="210" width="102" height="32" rx="8" fill="#2DC79A" fill-opacity="0.09" stroke="#2DC79A" stroke-width="1.1"/>
+      <text x="789" y="231" text-anchor="middle" fill="#5BE0BC">Bedrock</text>
+    </g>
+  </g>
+
+  <!-- Store -->
+  <g>
+    <rect x="372" y="306" width="216" height="40" rx="12" fill="#94A3B8" fill-opacity="0.12" stroke="#94A3B8" stroke-width="1.5"/>
+    <text x="480" y="324" text-anchor="middle" font-size="12.5" font-weight="600" fill="#CBD5E1">internal/store · BoltDB</text>
+    <text x="480" y="339" text-anchor="middle" font-size="10.5" fill="#A1A1A8">windowed counters + append-only audit log</text>
+  </g>
+
+  <!-- Observability -->
+  <g>
+    <rect x="620" y="278" width="236" height="68" rx="13" fill="#2DC79A" fill-opacity="0.08" stroke="#2DC79A" stroke-width="1.4"/>
+    <text x="738" y="300" text-anchor="middle" font-size="12.5" font-weight="600" fill="#5BE0BC">observability</text>
+    <text x="738" y="319" text-anchor="middle" font-size="11" fill="#D0D0D6">/metrics (Prometheus) · /v1/snapshot</text>
+    <text x="738" y="335" text-anchor="middle" font-size="11" fill="#D0D0D6">tokenctl top — live per-leaf burn</text>
+  </g>
+</svg>
