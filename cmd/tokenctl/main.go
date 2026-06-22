@@ -35,7 +35,7 @@ import (
 //
 //	go build -ldflags "-X main.Version=v0.1.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "0.1.0-dev"
+	Version = "0.2.0-dev"
 	Commit  = "unknown"
 )
 

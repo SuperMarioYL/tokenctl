@@ -127,7 +127,7 @@ acme.team-research                20      0           4.00M       ok (0%)
 | 部署形态 | npm / MCP server，跟随 Agent 进程 | 独立反代，平台侧统一治理 |
 | 调试体验 | ✓ 远比 tokenctl 强 | — 不涉及 |
 | 跨 provider 钱包 | — | ✓ Claude + OpenAI + Bedrock 一张账单 |
-| 在线抢占（kill mid-stream） | — | ✓ 高权重兄弟节点缺粮时强制让权 |
+| 在线抢占（kill mid-stream） | — | ✓ 高权重兄弟节点缺粮时取消在飞的低权重上游请求（客户端收到 `499` + `X-TokenCtl-Reason: preempted_by_sibling`） |
 | 软节流 + 硬拒绝 | — | ✓ 80% FIFO 排队 / 100% 429 |
 
 实事求是地讲：`chrome-devtools-mcp` 在它的本职上比 tokenctl 强得多，二者通常是**配套部署**而不是替代关系——Agent 由它增强，token 由我们仲裁。

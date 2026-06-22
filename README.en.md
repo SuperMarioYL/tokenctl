@@ -131,7 +131,7 @@ Full example at [`configs/tokenctl.example.yaml`](./configs/tokenctl.example.yam
 | Shape | npm / MCP server, follows the Agent | Standalone reverse proxy, platform-side |
 | Debugger reach | ✓ Far better than tokenctl | — Out of scope |
 | Cross-provider wallet | — | ✓ Claude + OpenAI + Bedrock on one bill |
-| Mid-stream preemption | — | ✓ Cancels low-weight in-flight calls |
+| Mid-stream preemption | — | ✓ Cancels the low-weight in-flight upstream call (client gets `499` + `X-TokenCtl-Reason: preempted_by_sibling`) |
 | Soft-throttle + hard-deny | — | ✓ 80% FIFO queue / 100% 429 |
 
 Honest call-out: `chrome-devtools-mcp` is materially better than tokenctl on its actual job. The two are **complementary**, not competitive — install both.
