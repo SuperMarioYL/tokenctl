@@ -70,6 +70,17 @@ type Admission interface {
 	AddInput(n int64)
 	AddOutput(n int64)
 	Release()
+
+	// Context is cancelled when the arbiter preempts this request (or when
+	// Release is called). The proxy injects it into the upstream call so a
+	// preempt actually tears down the in-flight upstream stream
+	// (fix-preemption-not-wired-to-upstream).
+	Context() context.Context
+
+	// Preempted reports whether the arbiter cancelled this admission, so the
+	// proxy can distinguish a deliberate preempt from a client/upstream
+	// disconnect and emit 499 + X-TokenCtl-Reason: preempted_by_sibling.
+	Preempted() bool
 }
 
 // Store is the optional persistence layer. m1 doesn't require any methods;
@@ -93,6 +104,17 @@ var (
 	// X-TokenCtl-Group.
 	ErrDenied = errors.New("tokenctl: budget exceeded")
 )
+
+// statusClientClosedRequest is nginx's non-standard 499 "Client Closed
+// Request". The proxy returns it to the client when the arbiter preempts an
+// in-flight request, mirroring the m3 contract
+// (fix-preemption-not-wired-to-upstream).
+const statusClientClosedRequest = 499
+
+// errPreempted is returned from ModifyResponse to route a preempted-but-already
+// -responded upstream call into ErrorHandler so it emits 499 before any client
+// bytes are written.
+var errPreempted = errors.New("tokenctl: preempted")
 
 // Server holds the runtime state. Construct with New, run with Run.
 type Server struct {
@@ -307,6 +329,14 @@ func (s *Server) reverseProxy(prov providers.Provider, adm Admission, w http.Res
 	provName := prov.Name()
 
 	rp.ModifyResponse = func(resp *http.Response) error {
+		// If the arbiter preempted between dispatch and the upstream response
+		// landing, abort here (before any client bytes) so ErrorHandler emits
+		// 499 rather than streaming a now-unwanted 200
+		// (fix-preemption-not-wired-to-upstream).
+		if adm.Preempted() {
+			_ = resp.Body.Close()
+			return errPreempted
+		}
 		// Drop content-length when we may rewrap as a streaming reader so the
 		// chunked-transfer path takes over cleanly.
 		ct := resp.Header.Get("Content-Type")
@@ -325,12 +355,47 @@ func (s *Server) reverseProxy(prov providers.Provider, adm Admission, w http.Res
 		return nil
 	}
 	rp.ErrorHandler = func(rw http.ResponseWriter, _ *http.Request, err error) {
+		// The arbiter cancels adm.Context() to preempt; that cancellation
+		// surfaces here as a context error on the upstream round-trip. Map it
+		// to 499 + X-TokenCtl-Reason: preempted_by_sibling so the client sees
+		// a deliberate preempt, not a generic 502
+		// (fix-preemption-not-wired-to-upstream).
+		if adm.Preempted() {
+			rw.Header().Set("X-TokenCtl-Reason", "preempted_by_sibling")
+			rw.Header().Set("X-TokenCtl-Group", adm.GroupPath())
+			rw.Header().Set("X-TokenCtl-Provider", provName)
+			http.Error(rw, "tokenctl: request preempted by higher-weight sibling", statusClientClosedRequest)
+			return
+		}
 		s.logger.Error("upstream error", "provider", provName, "err", err)
 		rw.Header().Set("X-TokenCtl-Reason", "upstream_error")
 		http.Error(rw, "tokenctl: upstream error", http.StatusBadGateway)
 	}
 
+	// Inject the admission's cancellable context into the upstream call so an
+	// arbiter preempt actually tears the upstream stream down mid-flight
+	// instead of letting it run to completion as a silent no-op
+	// (fix-preemption-not-wired-to-upstream). We preserve the original request
+	// context's values but swap its Done channel for the admission's.
+	r = r.WithContext(mergeCancel(r.Context(), adm.Context()))
+
 	rp.ServeHTTP(w, r)
+}
+
+// mergeCancel returns a context that carries parent's values but is cancelled
+// when EITHER parent or cancel fires. This lets the upstream call honour both
+// the client disconnecting (parent) and the arbiter preempting (cancel).
+func mergeCancel(parent, cancel context.Context) context.Context {
+	ctx, stop := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-cancel.Done():
+			stop()
+		case <-ctx.Done():
+			stop()
+		}
+	}()
+	return ctx
 }
 
 func isSSE(contentType string) bool {
@@ -489,8 +554,25 @@ func (r *sseMeteredReader) report(in, out int64) {
 	}
 }
 
-// jsonMeteredReader buffers a non-streamed JSON response, copies bytes to the
-// client as they arrive (so latency isn't bumped), and parses usage on EOF.
+// maxUsageBufferBytes caps how many bytes a jsonMeteredReader retains in
+// memory to locate the `usage` object on EOF
+// (fix-jsonmeteredreader-buffers-entire-body). Previously the reader buffered
+// the ENTIRE non-streamed body — a big embeddings batch or long buffered
+// completion kept a full second copy of the body per in-flight request,
+// scaling memory with concurrency×body (an OOM/DoS vector on the hot path)
+// even though only the small trailing usage object is needed.
+//
+// 64 KiB comfortably holds the usage block of every provider shape we parse
+// (Anthropic / OpenAI / Bedrock all emit `usage` near the END of the JSON
+// object, after content), while keeping worst-case retained memory bounded
+// regardless of body size.
+const maxUsageBufferBytes = 64 << 10
+
+// jsonMeteredReader copies a non-streamed JSON response to the client as bytes
+// arrive (so latency isn't bumped) and parses usage on EOF. To bound memory it
+// retains only a sliding TAIL of at most maxUsageBufferBytes — sufficient
+// because every provider shape places `usage` at the end of the body — instead
+// of the whole response.
 type jsonMeteredReader struct {
 	src      io.ReadCloser
 	meter    providers.Meter
@@ -498,23 +580,51 @@ type jsonMeteredReader struct {
 	metrics  *metrics
 	provider string
 
-	buf  bytes.Buffer
-	done atomic.Bool
+	mu    sync.Mutex
+	tail  []byte // last <= maxUsageBufferBytes bytes seen
+	total int64  // total bytes observed (for diagnostics)
+	done  atomic.Bool
 }
 
 func newJSONMeteredReader(src io.ReadCloser, m providers.Meter, a Admission, mm *metrics, prov string) io.ReadCloser {
-	return &jsonMeteredReader{src: src, meter: m, adm: a, metrics: mm, provider: prov}
+	return &jsonMeteredReader{
+		src:      src,
+		meter:    m,
+		adm:      a,
+		metrics:  mm,
+		provider: prov,
+		tail:     make([]byte, 0, maxUsageBufferBytes),
+	}
 }
 
 func (r *jsonMeteredReader) Read(p []byte) (int, error) {
 	n, err := r.src.Read(p)
 	if n > 0 {
-		r.buf.Write(p[:n])
+		r.appendTail(p[:n])
 	}
 	if errors.Is(err, io.EOF) {
 		r.finalize()
 	}
 	return n, err
+}
+
+// appendTail keeps only the last maxUsageBufferBytes bytes of the stream so
+// per-request memory is O(cap) regardless of body size.
+func (r *jsonMeteredReader) appendTail(chunk []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.total += int64(len(chunk))
+	if len(chunk) >= maxUsageBufferBytes {
+		// This chunk alone overflows the window: keep only its tail.
+		r.tail = append(r.tail[:0], chunk[len(chunk)-maxUsageBufferBytes:]...)
+		return
+	}
+	r.tail = append(r.tail, chunk...)
+	if len(r.tail) > maxUsageBufferBytes {
+		// Drop the oldest bytes to stay within the cap.
+		drop := len(r.tail) - maxUsageBufferBytes
+		r.tail = append(r.tail[:0], r.tail[drop:]...)
+	}
 }
 
 func (r *jsonMeteredReader) Close() error {
@@ -526,10 +636,34 @@ func (r *jsonMeteredReader) finalize() {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	if r.buf.Len() == 0 {
+	r.mu.Lock()
+	tail := r.tail
+	total := r.total
+	r.mu.Unlock()
+	if len(tail) == 0 {
 		return
 	}
-	in, out := r.meter.Observe("", r.buf.Bytes())
+
+	// If the whole body fit inside the cap, the tail IS the complete response —
+	// hand it to the meter verbatim. Otherwise the tail is a front-truncated
+	// fragment that won't parse as JSON, so reconstruct a minimal valid
+	// document carrying just the (top-level) usage signal the meters need
+	// (fix-jsonmeteredreader-buffers-entire-body). usage always lives at the
+	// END of the body, so it is present in the retained tail.
+	body := tail
+	if total > int64(len(tail)) {
+		if reconstructed, ok := reconstructUsageJSON(tail); ok {
+			body = reconstructed
+		} else {
+			// Couldn't locate a usage object in the tail (truncated mid-object
+			// or an unmetered shape): skip attribution rather than feed the
+			// meter invalid JSON. This matches the documented "what's metered"
+			// limitation for exotic bodies.
+			return
+		}
+	}
+
+	in, out := r.meter.Observe("", body)
 	if in > 0 {
 		r.adm.AddInput(in)
 		r.metrics.InputTokens.WithLabelValues(r.provider, r.adm.GroupPath()).Add(float64(in))
@@ -538,6 +672,109 @@ func (r *jsonMeteredReader) finalize() {
 		r.adm.AddOutput(out)
 		r.metrics.OutputTokens.WithLabelValues(r.provider, r.adm.GroupPath()).Add(float64(out))
 	}
+}
+
+// reconstructUsageJSON scans a (possibly front-truncated) JSON fragment for the
+// last top-level `"usage": { ... }` object and the Llama-style flat fields
+// (prompt_token_count / generation_token_count) and returns a minimal valid
+// JSON document the provider meters can parse. It returns ok=false when no
+// usage signal is found. This is what lets the metered reader keep only a
+// bounded tail of a large non-streamed body instead of the whole thing.
+func reconstructUsageJSON(frag []byte) ([]byte, bool) {
+	parts := make([][]byte, 0, 3)
+
+	if obj := lastJSONObjectForKey(frag, "usage"); obj != nil {
+		parts = append(parts, append([]byte(`"usage":`), obj...))
+	}
+	for _, k := range []string{"prompt_token_count", "generation_token_count"} {
+		if v := lastJSONNumberForKey(frag, k); v != nil {
+			parts = append(parts, append(append([]byte{'"'}, k...), append([]byte(`":`), v...)...))
+		}
+	}
+	if len(parts) == 0 {
+		return nil, false
+	}
+	out := bytes.Join(parts, []byte{','})
+	doc := make([]byte, 0, len(out)+2)
+	doc = append(doc, '{')
+	doc = append(doc, out...)
+	doc = append(doc, '}')
+	return doc, true
+}
+
+// lastJSONObjectForKey finds the last occurrence of "key": and returns the
+// balanced { ... } object that follows, or nil if the value isn't a complete
+// object within frag.
+func lastJSONObjectForKey(frag []byte, key string) []byte {
+	needle := []byte(`"` + key + `"`)
+	start := bytes.LastIndex(frag, needle)
+	if start < 0 {
+		return nil
+	}
+	i := start + len(needle)
+	// Skip whitespace and the ':'.
+	for i < len(frag) && (frag[i] == ' ' || frag[i] == '\t' || frag[i] == '\n' || frag[i] == '\r' || frag[i] == ':') {
+		i++
+	}
+	if i >= len(frag) || frag[i] != '{' {
+		return nil
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for j := i; j < len(frag); j++ {
+		c := frag[j]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return frag[i : j+1]
+			}
+		}
+	}
+	return nil // unbalanced — object truncated by the tail window
+}
+
+// lastJSONNumberForKey finds the last "key": <number> and returns the number
+// literal, or nil if absent / not a bare number.
+func lastJSONNumberForKey(frag []byte, key string) []byte {
+	needle := []byte(`"` + key + `"`)
+	start := bytes.LastIndex(frag, needle)
+	if start < 0 {
+		return nil
+	}
+	i := start + len(needle)
+	for i < len(frag) && (frag[i] == ' ' || frag[i] == '\t' || frag[i] == '\n' || frag[i] == '\r' || frag[i] == ':') {
+		i++
+	}
+	j := i
+	for j < len(frag) {
+		c := frag[j]
+		if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
+			j++
+			continue
+		}
+		break
+	}
+	if j == i {
+		return nil
+	}
+	return frag[i:j]
 }
 
 // ---------------------------------------------------------------------------

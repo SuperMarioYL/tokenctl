@@ -99,6 +99,10 @@ func (a *arbiter) loop() {
 // tickOnce is broken out from loop so tests can drive the arbiter
 // deterministically without waiting on the ticker.
 func (a *arbiter) tickOnce() {
+	// Roll the whole tree over against a single now first so all subsequent
+	// preempt decisions on this tick see coherent windowStarts
+	// (fix-uncoordinated-window-reset-breaks-rollup).
+	a.tree.rolloverAll(time.Now())
 	a.walk(a.tree.root)
 	a.walletGuard()
 }

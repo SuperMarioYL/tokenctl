@@ -46,6 +46,14 @@ var (
 	ErrDenied     = proxy.ErrDenied
 )
 
+// defaultReserveEstimate is the conservative per-request in-flight token
+// estimate held against budgets at admission time
+// (fix-admit-check-then-act-overshoot). It is large enough that a burst of
+// concurrent admissions reflects pending spend rather than admitting them all
+// at consumed≈0, but small enough that a single request against a generous
+// budget still admits. Tunable via Tree.SetReserveEstimate.
+const defaultReserveEstimate int64 = 8000
+
 // State describes the optional persistence hook the tree calls into on every
 // counter mutation. The store package (polish stage) implements it; passing
 // nil is supported for in-memory runs (tests, dry-runs) and is the default
@@ -88,6 +96,14 @@ type Tree struct {
 	walletBudget  *config.TokenBudget
 	walletWindowD time.Duration
 
+	// reserveEstimate is the per-request in-flight token estimate counted
+	// against budgets at admission time so a swarm of concurrent agents that
+	// each admit at consumed≈0 cannot collectively overshoot the hard ceiling
+	// before their tokens are credited asynchronously
+	// (fix-admit-check-then-act-overshoot). Reservations are drawn down as the
+	// real tokens stream in and fully released on Release.
+	reserveEstimate int64
+
 	state State
 
 	mu                sync.Mutex
@@ -97,7 +113,7 @@ type Tree struct {
 	inFlightCount     int64
 	deniesTotal       atomic.Int64
 	throttlesTotal    atomic.Int64
-	preemptsTotal    atomic.Int64
+	preemptsTotal     atomic.Int64
 
 	arb *arbiter
 
@@ -126,6 +142,7 @@ type node struct {
 
 	mu          sync.Mutex
 	consumed    int64
+	reserved    int64 // sum of in-flight per-request estimates not yet credited
 	windowStart time.Time
 	inFlight    map[*Admission]struct{}
 	denies      int64
@@ -147,6 +164,16 @@ type Admission struct {
 	chain    []*node // leaf .. root (deepest first)
 
 	startedAt time.Time
+
+	// reservation is the per-request in-flight token estimate held on every
+	// node in chain at admission time (fix-admit-check-then-act-overshoot). As
+	// real tokens stream in they are credited to consumed and an equal amount
+	// is drawn down from the reservation, so a node's effective load
+	// (consumed+reserved) never under-counts an in-flight burst. reservedLeft
+	// tracks the still-held portion; it is released on the final reconcile in
+	// Release().
+	reservation  int64
+	reservedLeft atomic.Int64
 
 	mu  sync.Mutex
 	in  int64
@@ -181,6 +208,7 @@ func NewTree(root *config.GroupConfig, state any) (*Tree, error) {
 		leafByPath:       map[string]*node{},
 		leafByKey:        map[string]*node{},
 		providerConsumed: map[string]int64{},
+		reserveEstimate:  defaultReserveEstimate,
 	}
 	if s, ok := state.(State); ok {
 		t.state = s
@@ -255,6 +283,17 @@ func (t *Tree) SetWallet(w *config.WalletConfig) error {
 		}
 	}
 	return nil
+}
+
+// SetReserveEstimate overrides the per-request in-flight token estimate held
+// against budgets at admission time (fix-admit-check-then-act-overshoot). A
+// value <= 0 disables reservation (reverting to the legacy check-then-act
+// behaviour). Call before Admit fires.
+func (t *Tree) SetReserveEstimate(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	t.reserveEstimate = n
 }
 
 // buildNode recursively materialises a GroupConfig into a node + collects the
@@ -356,18 +395,28 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 	}
 
 	chain := chainToRoot(leaf)
+	now := time.Now()
+	reserve := t.reserveEstimate
 
 	// Hard-deny + soft-throttle pre-checks on every ancestor. Hard wins over
 	// soft (deny is final), so we run all hard checks first.
+	//
+	// The comparison uses effectiveLoad (consumed + reserved) plus this
+	// request's own reserve estimate, so N concurrent agents that all admit at
+	// consumed≈0 cannot collectively blow past the hard ceiling before their
+	// tokens are credited asynchronously
+	// (fix-admit-check-then-act-overshoot). All checks read against one now so
+	// a window boundary can't make different ancestors disagree
+	// (fix-uncoordinated-window-reset-breaks-rollup).
 	for _, n := range chain {
 		if n.budget == nil {
 			continue
 		}
-		c, _ := n.snapshotConsumed()
-		if c >= n.budget.Tokens {
+		load, _ := n.effectiveLoad(now)
+		if load >= n.budget.Tokens {
 			n.bumpDenies()
 			t.deniesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: time.Now(), Kind: "deny", Reason: "budget_exceeded", Group: n.path, Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "budget_exceeded", Group: n.path, Provider: provider})
 			return nil, ErrDenied
 		}
 	}
@@ -375,7 +424,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		wc, _ := t.walletSnapshot()
 		if wc >= t.walletBudget.Tokens {
 			t.deniesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: time.Now(), Kind: "deny", Reason: "wallet_exceeded", Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "wallet_exceeded", Provider: provider})
 			return nil, ErrDenied
 		}
 	}
@@ -384,11 +433,11 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		if n.budget == nil {
 			continue
 		}
-		c, _ := n.snapshotConsumed()
-		if frac(c, n.budget.Tokens) >= n.budget.SoftThrottleAt {
+		load, _ := n.effectiveLoad(now)
+		if frac(load, n.budget.Tokens) >= n.budget.SoftThrottleAt {
 			n.bumpThrottles()
 			t.throttlesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: time.Now(), Kind: "throttle", Reason: "soft_throttle", Group: n.path, Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "soft_throttle", Group: n.path, Provider: provider})
 			return nil, ErrThrottled
 		}
 	}
@@ -396,7 +445,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		wc, _ := t.walletSnapshot()
 		if frac(wc, t.walletBudget.Tokens) >= t.walletBudget.SoftThrottleAt {
 			t.throttlesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: time.Now(), Kind: "throttle", Reason: "wallet_soft", Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "wallet_soft", Provider: provider})
 			return nil, ErrThrottled
 		}
 	}
@@ -407,9 +456,21 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		leaf:      leaf,
 		provider:  provider,
 		chain:     chain,
-		startedAt: time.Now(),
+		startedAt: now,
 		ctx:       ctx,
 		cancel:    cancel,
+	}
+	// Place the reservation on every node in the chain so it is visible to
+	// concurrent admissions immediately. Drawn down by attribute() as real
+	// tokens arrive; any remainder released in Release().
+	if reserve > 0 {
+		a.reservation = reserve
+		a.reservedLeft.Store(reserve)
+		for _, anc := range chain {
+			anc.mu.Lock()
+			anc.reserved += reserve
+			anc.mu.Unlock()
+		}
 	}
 	leaf.mu.Lock()
 	leaf.inFlight[a] = struct{}{}
@@ -417,7 +478,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 	t.mu.Lock()
 	t.inFlightCount++
 	t.mu.Unlock()
-	t.appendAudit(AuditEvent{At: time.Now(), Kind: "admit", Group: leaf.path, Provider: provider})
+	t.appendAudit(AuditEvent{At: now, Kind: "admit", Group: leaf.path, Provider: provider})
 	return a, nil
 }
 
@@ -461,6 +522,9 @@ func (a *Admission) Release() {
 	if !a.released.CompareAndSwap(false, true) {
 		return
 	}
+	// Release any reservation the request didn't burn through so phantom
+	// in-flight load doesn't pin the tree (fix-admit-check-then-act-overshoot).
+	a.releaseReservation()
 	a.leaf.mu.Lock()
 	delete(a.leaf.inFlight, a)
 	a.leaf.mu.Unlock()
@@ -480,6 +544,44 @@ func (a *Admission) Release() {
 	})
 }
 
+// drawReservation removes up to n from the still-held reservation and returns
+// the amount actually drawn. Used by attribute() to keep consumed+reserved
+// conserved as real tokens replace the estimate.
+func (a *Admission) drawReservation(n int64) int64 {
+	for {
+		cur := a.reservedLeft.Load()
+		if cur <= 0 {
+			return 0
+		}
+		draw := n
+		if draw > cur {
+			draw = cur
+		}
+		if a.reservedLeft.CompareAndSwap(cur, cur-draw) {
+			return draw
+		}
+	}
+}
+
+// releaseReservation removes whatever reservation is still held from every
+// node on the chain. Called from Release() so a request that under-ran its
+// estimate (or never reported usage) doesn't leave phantom load pinned on the
+// tree (fix-admit-check-then-act-overshoot).
+func (a *Admission) releaseReservation() {
+	left := a.reservedLeft.Swap(0)
+	if left <= 0 {
+		return
+	}
+	for _, anc := range a.chain {
+		anc.mu.Lock()
+		anc.reserved -= left
+		if anc.reserved < 0 {
+			anc.reserved = 0
+		}
+		anc.mu.Unlock()
+	}
+}
+
 // Context returns a context that is cancelled when the request is preempted
 // by the arbiter or released by the proxy. Proxy m3 wiring will pass this as
 // the upstream HTTP context so cancellation tears down the upstream connection.
@@ -490,14 +592,34 @@ func (a *Admission) Preempted() bool { return a.preempted.Load() }
 
 // attribute walks the chain and credits n tokens to each ancestor, the
 // wallet, and the per-provider counter. It also persists best-effort.
+//
+// A single now is captured up front so every node + the wallet that rolls
+// over on this delta does so against the *same* instant
+// (fix-uncoordinated-window-reset-breaks-rollup) — a parent and child can no
+// longer drift their windowStart across a boundary and break the
+// sum(child.consumed) <= parent.consumed invariant.
+//
+// As real tokens are credited they draw down the per-request reservation held
+// at admission (fix-admit-check-then-act-overshoot) so a node's effective
+// load (consumed + reserved) is conserved across the credit, never
+// double-counting and never momentarily dipping below the true in-flight
+// estimate.
 func (t *Tree) attribute(a *Admission, n int64) {
+	now := time.Now()
+	// Draw down the reservation by the amount we're about to credit, bounded
+	// by what's still held. The drawn amount is removed from each node's
+	// reserved counter so reserved + consumed stays monotone w.r.t. real spend.
+	draw := a.drawReservation(n)
 	for _, anc := range a.chain {
 		anc.mu.Lock()
-		if anc.windowD > 0 && time.Since(anc.windowStart) >= anc.windowD {
-			anc.consumed = 0
-			anc.windowStart = time.Now()
-		}
+		anc.maybeRolloverLocked(now)
 		anc.consumed += n
+		if draw > 0 {
+			anc.reserved -= draw
+			if anc.reserved < 0 {
+				anc.reserved = 0
+			}
+		}
 		c, ws := anc.consumed, anc.windowStart
 		anc.mu.Unlock()
 		if t.state != nil {
@@ -506,11 +628,23 @@ func (t *Tree) attribute(a *Admission, n int64) {
 	}
 	t.mu.Lock()
 	if t.walletBudget != nil {
-		if t.walletWindowD > 0 && time.Since(t.walletWindowStart) >= t.walletWindowD {
+		if t.walletWindowD > 0 && now.Sub(t.walletWindowStart) >= t.walletWindowD {
 			t.walletConsumed = 0
-			t.walletWindowStart = time.Now()
+			t.walletWindowStart = now
 		}
 		t.walletConsumed += n
+		wc, wws := t.walletConsumed, t.walletWindowStart
+		t.providerConsumed[a.provider] += n
+		t.mu.Unlock()
+		// Persist the org wallet on every attribution, not only on graceful
+		// Close (fix-wallet-counter-not-persisted-on-attribution): a crash /
+		// SIGKILL / OOM between windows otherwise loses the whole window's
+		// org-level spend and SetWallet reloads it as 0, silently resetting
+		// the hard org cap.
+		if t.state != nil {
+			_ = t.state.SaveCounter("__wallet__", wc, wws)
+		}
+		return
 	}
 	t.providerConsumed[a.provider] += n
 	t.mu.Unlock()
@@ -698,11 +832,38 @@ func (t *Tree) Collect(ch chan<- prometheus.Metric) {
 func (n *node) snapshotConsumed() (int64, time.Time) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.windowD > 0 && time.Since(n.windowStart) >= n.windowD {
-		n.consumed = 0
-		n.windowStart = time.Now()
-	}
+	n.maybeRolloverLocked(time.Now())
 	return n.consumed, n.windowStart
+}
+
+// effectiveLoad returns consumed + reserved (the in-flight estimate held by
+// live admissions) for a node, applying a lazy window reset against now. This
+// is the value the admission gate compares against budgets so a concurrent
+// swarm that has admitted but not yet been credited still counts toward the
+// ceiling (fix-admit-check-then-act-overshoot).
+func (n *node) effectiveLoad(now time.Time) (int64, time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.maybeRolloverLocked(now)
+	load := n.consumed + n.reserved
+	if load < 0 {
+		load = 0
+	}
+	return load, n.windowStart
+}
+
+// maybeRolloverLocked resets the node's window against the supplied now if the
+// window has elapsed. The caller MUST hold n.mu. Passing a single now down a
+// whole chain (see attribute / Tree.rolloverAll) is what keeps parent and
+// child windowStart coherent across a boundary
+// (fix-uncoordinated-window-reset-breaks-rollup). Reservations are NOT zeroed
+// on rollover — an in-flight request that straddles a window boundary still
+// holds real headroom in the new window.
+func (n *node) maybeRolloverLocked(now time.Time) {
+	if n.windowD > 0 && now.Sub(n.windowStart) >= n.windowD {
+		n.consumed = 0
+		n.windowStart = now
+	}
 }
 
 func (n *node) bumpDenies() {
@@ -715,6 +876,33 @@ func (n *node) bumpThrottles() {
 	n.mu.Lock()
 	n.throttles++
 	n.mu.Unlock()
+}
+
+// rolloverAll resets every node + the wallet whose window has elapsed against
+// a single now. Driven by the arbiter tick so the whole tree rolls coherently
+// — the documented sum(child.consumed) <= parent.consumed invariant holds
+// across a window boundary instead of drifting per-node
+// (fix-uncoordinated-window-reset-breaks-rollup). Lazy resets in the read /
+// attribute paths remain as a fallback for when the arbiter is stopped, but
+// they too now reset whole chains against one now.
+func (t *Tree) rolloverAll(now time.Time) {
+	for _, n := range t.flat {
+		n.mu.Lock()
+		n.maybeRolloverLocked(now)
+		n.mu.Unlock()
+	}
+	t.mu.Lock()
+	if t.walletBudget != nil && t.walletWindowD > 0 && now.Sub(t.walletWindowStart) >= t.walletWindowD {
+		t.walletConsumed = 0
+		t.walletWindowStart = now
+		if t.state != nil {
+			c, ws := t.walletConsumed, t.walletWindowStart
+			t.mu.Unlock()
+			_ = t.state.SaveCounter("__wallet__", c, ws)
+			return
+		}
+	}
+	t.mu.Unlock()
 }
 
 func (t *Tree) walletSnapshot() (int64, time.Time) {
