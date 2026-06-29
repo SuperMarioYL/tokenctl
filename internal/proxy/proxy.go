@@ -487,13 +487,42 @@ func (r *sseMeteredReader) consume(chunk []byte) {
 	r.pending.Write(chunk)
 	for {
 		buf := r.pending.Bytes()
-		idx := bytes.Index(buf, []byte("\n\n"))
+		// SSE separates events with a blank line, which on the wire is EITHER
+		// "\n\n" (LF) OR "\r\n\r\n" (CRLF). Real Anthropic/OpenAI gateways and
+		// TLS-terminating proxies frequently emit CRLF, and "\r\n\r\n" contains
+		// no "\n\n" substring, so splitting on "\n\n" alone never frames a
+		// CRLF stream incrementally — every event would pile up until EOF and
+		// collapse into one mis-attributed pseudo-event. Take whichever
+		// separator appears first.
+		idx, sep := firstEventBoundary(buf)
 		if idx < 0 {
 			return
 		}
 		event := append([]byte(nil), buf[:idx]...)
-		r.pending.Next(idx + 2)
+		r.pending.Next(idx + sep)
 		r.processEvent(event)
+	}
+}
+
+// firstEventBoundary returns the index of the earliest SSE event separator in
+// buf and the length of that separator (2 for "\n\n", 4 for "\r\n\r\n"), or
+// (-1, 0) when neither is present yet. When both appear, the one starting at the
+// lower index wins; on a tie at the same index the longer CRLF form is preferred
+// so its trailing "\r\n" isn't left dangling at the head of the next event.
+func firstEventBoundary(buf []byte) (int, int) {
+	lf := bytes.Index(buf, []byte("\n\n"))
+	crlf := bytes.Index(buf, []byte("\r\n\r\n"))
+	switch {
+	case lf < 0 && crlf < 0:
+		return -1, 0
+	case crlf < 0:
+		return lf, 2
+	case lf < 0:
+		return crlf, 4
+	case crlf <= lf:
+		return crlf, 4
+	default:
+		return lf, 2
 	}
 }
 

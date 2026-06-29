@@ -270,6 +270,27 @@ func validateGroup(g *GroupConfig, parentPath string, leaves map[string]bool) er
 			return err
 		}
 	}
+	// Enforce the core hierarchical invariant documented in mvp_plan §2:
+	// sum(child.budget.tokens) <= parent.budget.tokens. Without this, an
+	// over-subscribed tree (e.g. three 10M teams under a 20M org) loads silently
+	// and then enforces incoherent semantics — each child admits up to its own
+	// ceiling while the parent hard-deny is only reachable in aggregate, so the
+	// children can collectively overshoot the org cap the operator believes they
+	// configured. The whole hierarchical-budget value proposition rests on this
+	// holding, so reject it at load rather than mis-enforce at runtime. Only
+	// budgeted children count toward the sum; an unbudgeted child is bounded by
+	// its ancestors, not by a ceiling of its own.
+	if g.Budget != nil {
+		var childSum int64
+		for _, child := range g.Children {
+			if child.Budget != nil {
+				childSum += child.Budget.Tokens
+			}
+		}
+		if childSum > g.Budget.Tokens {
+			return fmt.Errorf("group %s: children's budgets sum to %d tokens, which exceeds this node's budget of %d — a child can never spend budget its parent doesn't have (sum(child) must be <= parent)", path, childSum, g.Budget.Tokens)
+		}
+	}
 	return nil
 }
 

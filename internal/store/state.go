@@ -203,22 +203,41 @@ func (s *Store) flush() error {
 	s.dirty = map[string]counterRecord{}
 	s.mu.Unlock()
 
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketCounters))
 		if b == nil {
 			return errors.New("store: counters bucket missing")
 		}
 		for group, rec := range pending {
-			payload, err := json.Marshal(rec)
-			if err != nil {
-				return fmt.Errorf("store: marshal %s: %w", group, err)
+			payload, merr := json.Marshal(rec)
+			if merr != nil {
+				return fmt.Errorf("store: marshal %s: %w", group, merr)
 			}
-			if err := b.Put([]byte(group), payload); err != nil {
-				return err
+			if perr := b.Put([]byte(group), payload); perr != nil {
+				return perr
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		// The transaction failed (disk full, transient bbolt error, …) and the
+		// pending records were already swapped out of s.dirty above, so without
+		// this they would be lost forever — that window's per-node consumed
+		// counters AND the org __wallet__ counter would silently reload toward 0
+		// on the next restore, resetting the hard cap. Merge the unwritten
+		// records back into s.dirty so the next flush tick retries them. A newer
+		// SaveCounter for the same key that landed while the tx was running wins
+		// (it is the fresher truth), so we only re-queue keys not already
+		// re-dirtied.
+		s.mu.Lock()
+		for group, rec := range pending {
+			if _, fresher := s.dirty[group]; !fresher {
+				s.dirty[group] = rec
+			}
+		}
+		s.mu.Unlock()
+	}
+	return err
 }
 
 // loadAuditCursor reads the highest audit key so AppendAudit issues a

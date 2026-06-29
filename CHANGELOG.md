@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-30
+
+Correctness-hardening pass. Three targeted fixes found by re-reading the shipped
+source — all in tokenctl's own proxy / store / config lane, no new surface area —
+plus Go regression tests for each.
+
+### Fixed
+- **Streamed token metering now works on CRLF-framed SSE.** The SSE meter split
+  events only on `\n\n`, but real Anthropic/OpenAI gateways and TLS-terminating
+  proxies frequently frame events with `\r\n\r\n` (CRLF) — which contains no `\n\n`
+  substring — so a CRLF stream was never split incrementally. Every event piled up
+  until EOF and collapsed into a single pseudo-event carrying only the last `event:`
+  name, dropping `message_start` usage and starving the arbiter of the mid-stream
+  signal it preempts on. The reader now frames on both `\n\n` and `\r\n\r\n` (HIGH).
+- **A failed counter flush no longer loses the window's spend.** `Store.flush()`
+  swapped the dirty set out and cleared it *before* the BoltDB transaction ran, so
+  any failed `db.Update` (disk full, transient bbolt error) permanently dropped that
+  window's per-node *and* `__wallet__` counters — silently resetting the hard cap
+  toward 0 on the next restore, re-opening the v0.2.0 crash-safety guarantee through
+  the flush-error path. Unwritten records are now merged back into the dirty set on a
+  transaction error so the next flush tick retries them (HIGH).
+- **Over-subscribed budget trees are rejected at load.** `Validate()` never checked
+  the core invariant `sum(child.budget) <= parent.budget`, so a tree where the teams'
+  budgets summed above the org ceiling loaded silently and then enforced incoherent
+  deny/throttle decisions against the very invariant the hierarchy promises. Such a
+  config is now rejected at load with a clear error, on every node, not just the root
+  (MEDIUM).
+
+### Added
+- Go regression tests: `sse_crlf_test.go` (LF + CRLF + chunked-read framing),
+  `flush_retry_test.go` (re-queue on transaction error + retry lands),
+  `budget_invariant_test.go` (over-subscription rejected at root and inner nodes;
+  Sample config stays valid).
+
 ## [0.2.0] - 2026-06-23
 
 Enforcement-correctness pass. v0.1 shipped the three milestones but several of the
