@@ -6,6 +6,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-03
+
+Correctness-hardening pass. Two targeted fixes found by re-reading the shipped
+source — both in tokenctl's own budget-tree lane, no new surface area — plus Go
+regression tests for each.
+
+### Fixed
+- **A concurrent agent swarm can no longer overshoot the org wallet cap.** The
+  v0.2.0 node-level swarm-overshoot fix (a per-request in-flight reservation
+  counted at admission) was never applied at the wallet layer: the wallet
+  admission gate read only already-credited spend, so N concurrent agents spread
+  across generous leaves all passed the wallet gate at `walletConsumed≈0` and
+  overshot the org cap unboundedly — the exact overshoot v0.2.0 closed for nodes,
+  reopened at the wallet. The wallet gate now reserves an in-flight estimate per
+  admission (mirroring the node reservation) and compares `consumed+reserved`
+  against the ceiling, drawing the reservation down on attribution and releasing
+  the remainder on `Release` (HIGH).
+- **Per-provider spend now resets with the wallet window.** `providerConsumed`
+  was a lifetime-monotonic map — only ever incremented, never reset — while
+  `walletConsumed` resets to 0 on every wallet-window rollover. After the first
+  boundary they diverged permanently, so `walletGuard` preempted whichever
+  provider was heaviest in window 1 rather than the current window's actual
+  heaviest spender, and the `tokenctl top` per-provider view misreported
+  current-window spend. Per-provider counters now reset on every wallet rollover
+  (the centralized arbiter path and both lazy rollover branches) so
+  `sum(per-provider) == walletConsumed` holds across boundaries (MEDIUM).
+
+### Added
+- Go regression tests: a deterministic wallet-reservation test proving the
+  reservation is placed at admit, seen by the next admit's effective-load check,
+  bounds admits to `ceiling/reserve`, and is released on `Release`; a concurrent
+  wallet-overshoot test mirroring the node-level reference; and a per-provider
+  reset-on-rollover test covering the arbiter path and both lazy rollover
+  branches.
+
 ## [0.3.0] - 2026-06-30
 
 Correctness-hardening pass. Three targeted fixes found by re-reading the shipped

@@ -108,6 +108,12 @@ type Tree struct {
 
 	mu                sync.Mutex
 	walletConsumed    int64
+	// walletReserved mirrors walletConsumed for in-flight admissions: the sum
+	// of per-request reserve estimates not yet credited to walletConsumed. The
+	// wallet admission gate compares walletConsumed + walletReserved against
+	// the ceiling so a concurrent swarm can't all pass at walletConsumed≈0 and
+	// overshoot the org cap (fix-wallet-admit-gate-has-no-in-flight-reservation).
+	walletReserved    int64
 	walletWindowStart time.Time
 	providerConsumed  map[string]int64
 	inFlightCount     int64
@@ -421,8 +427,8 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		}
 	}
 	if t.walletBudget != nil {
-		wc, _ := t.walletSnapshot()
-		if wc >= t.walletBudget.Tokens {
+		wl, _ := t.walletEffectiveLoad(now)
+		if wl >= t.walletBudget.Tokens {
 			t.deniesTotal.Add(1)
 			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "wallet_exceeded", Provider: provider})
 			return nil, ErrDenied
@@ -442,8 +448,8 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		}
 	}
 	if t.walletBudget != nil {
-		wc, _ := t.walletSnapshot()
-		if frac(wc, t.walletBudget.Tokens) >= t.walletBudget.SoftThrottleAt {
+		wl, _ := t.walletEffectiveLoad(now)
+		if frac(wl, t.walletBudget.Tokens) >= t.walletBudget.SoftThrottleAt {
 			t.throttlesTotal.Add(1)
 			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "wallet_soft", Provider: provider})
 			return nil, ErrThrottled
@@ -470,6 +476,16 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 			anc.mu.Lock()
 			anc.reserved += reserve
 			anc.mu.Unlock()
+		}
+		// Mirror the per-node reservation at the wallet layer so the wallet
+		// admission gate (walletEffectiveLoad) sees pending in-flight spend;
+		// without it N concurrent agents across generous leaves all pass the
+		// wallet gate at walletConsumed≈0 and overshoot the org cap unboundedly
+		// (fix-wallet-admit-gate-has-no-in-flight-reservation).
+		if t.walletBudget != nil {
+			t.mu.Lock()
+			t.walletReserved += reserve
+			t.mu.Unlock()
 		}
 	}
 	leaf.mu.Lock()
@@ -580,6 +596,21 @@ func (a *Admission) releaseReservation() {
 		}
 		anc.mu.Unlock()
 	}
+	// Drain the matching reservation from the org wallet so a released
+	// request doesn't leave phantom in-flight load pinned against the wallet
+	// cap (fix-wallet-admit-gate-has-no-in-flight-reservation). The floor
+	// keeps walletReserved >= 0 across every admit path (deny / throttle /
+	// normal release); the walletBudget guard avoids touching the counter on
+	// trees without a wallet.
+	t := a.tree
+	t.mu.Lock()
+	if t.walletBudget != nil {
+		t.walletReserved -= left
+		if t.walletReserved < 0 {
+			t.walletReserved = 0
+		}
+	}
+	t.mu.Unlock()
 }
 
 // Context returns a context that is cancelled when the request is preempted
@@ -631,8 +662,24 @@ func (t *Tree) attribute(a *Admission, n int64) {
 		if t.walletWindowD > 0 && now.Sub(t.walletWindowStart) >= t.walletWindowD {
 			t.walletConsumed = 0
 			t.walletWindowStart = now
+			// Per-provider totals must roll over with the wallet, otherwise
+			// sum(providerConsumed) > walletConsumed forever after the first
+			// boundary and walletGuard preempts a stale window-1 heavy hitter
+			// instead of the current window's
+			// (fix-providerconsumed-not-reset-on-wallet-window-rollover).
+			t.providerConsumed = map[string]int64{}
 		}
 		t.walletConsumed += n
+		if draw > 0 {
+			// Draw down the wallet reservation by the same amount just
+			// credited, keeping walletConsumed + walletReserved conserved as
+			// real tokens replace the in-flight estimate
+			// (fix-wallet-admit-gate-has-no-in-flight-reservation).
+			t.walletReserved -= draw
+			if t.walletReserved < 0 {
+				t.walletReserved = 0
+			}
+		}
 		wc, wws := t.walletConsumed, t.walletWindowStart
 		t.providerConsumed[a.provider] += n
 		t.mu.Unlock()
@@ -895,6 +942,11 @@ func (t *Tree) rolloverAll(now time.Time) {
 	if t.walletBudget != nil && t.walletWindowD > 0 && now.Sub(t.walletWindowStart) >= t.walletWindowD {
 		t.walletConsumed = 0
 		t.walletWindowStart = now
+		// Reset per-provider totals with the wallet window so they stay
+		// coherent with walletConsumed — walletGuard targets the current
+		// window's heavy hitter, not a stale lifetime total
+		// (fix-providerconsumed-not-reset-on-wallet-window-rollover).
+		t.providerConsumed = map[string]int64{}
 		if t.state != nil {
 			c, ws := t.walletConsumed, t.walletWindowStart
 			t.mu.Unlock()
@@ -905,12 +957,44 @@ func (t *Tree) rolloverAll(now time.Time) {
 	t.mu.Unlock()
 }
 
+// walletEffectiveLoad returns walletConsumed + walletReserved — the in-flight
+// estimate held by live admissions — for the org wallet, applying a lazy window
+// reset against now. This is the value the wallet admission gate compares
+// against the ceiling so a concurrent swarm that has admitted but not yet been
+// credited cannot collectively overshoot the org cap
+// (fix-wallet-admit-gate-has-no-in-flight-reservation): the wallet-layer
+// analogue of node.effectiveLoad. walletReserved is intentionally NOT reset on
+// rollover (an in-flight request straddling a boundary still holds real
+// headroom, mirroring maybeRolloverLocked); per-provider totals ARE reset here
+// so they stay coherent with the windowed walletConsumed
+// (fix-providerconsumed-not-reset-on-wallet-window-rollover).
+func (t *Tree) walletEffectiveLoad(now time.Time) (int64, time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.walletWindowD > 0 && now.Sub(t.walletWindowStart) >= t.walletWindowD {
+		t.walletConsumed = 0
+		t.walletWindowStart = now
+		t.providerConsumed = map[string]int64{}
+	}
+	load := t.walletConsumed + t.walletReserved
+	if load < 0 {
+		load = 0
+	}
+	return load, t.walletWindowStart
+}
+
 func (t *Tree) walletSnapshot() (int64, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.walletWindowD > 0 && time.Since(t.walletWindowStart) >= t.walletWindowD {
 		t.walletConsumed = 0
 		t.walletWindowStart = time.Now()
+		// Per-provider totals roll over with the wallet window here too —
+		// walletSnapshot is the lazy rollover path used by Snapshot / Collect
+		// and walletGuard, so it must reset providers to stay coherent with
+		// windowed walletConsumed (fix-providerconsumed-not-reset-on-wallet-
+		// window-rollover).
+		t.providerConsumed = map[string]int64{}
 	}
 	return t.walletConsumed, t.walletWindowStart
 }
