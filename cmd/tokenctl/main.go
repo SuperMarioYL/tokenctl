@@ -139,6 +139,16 @@ func newServeCmd() *cobra.Command {
 }
 
 func runProxy(cmd *cobra.Command, cfgPath string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	return runProxyCtx(ctx, cmd, cfgPath)
+}
+
+// runProxyCtx is the cancellable core of runProxy, split out so the boot wiring
+// (config load, tree build, key + wallet binding, proxy run) can be exercised
+// end-to-end in a test that supplies its own context instead of a SIGINT one.
+// runProxy passes a signal-derived context; behaviour is otherwise identical.
+func runProxyCtx(ctx context.Context, cmd *cobra.Command, cfgPath string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -155,13 +165,22 @@ func runProxy(cmd *cobra.Command, cfgPath string) error {
 	}
 	defer tree.Close()
 
+	// NewTree only builds the group hierarchy; the inbound API-key -> leaf
+	// bindings and the optional org wallet ceiling are wired separately. Without
+	// these two calls the tree's leafByKey is empty (so Admit 401s every
+	// request as unknown_key) and t.walletBudget stays nil (so the advertised
+	// org cap is a silent no-op). SetWallet is a no-op when cfg.Wallet is nil.
+	if err := tree.BindAll(cfg.APIKeys); err != nil {
+		return fmt.Errorf("bind api keys: %w", err)
+	}
+	if err := tree.SetWallet(cfg.Wallet); err != nil {
+		return fmt.Errorf("set wallet: %w", err)
+	}
+
 	srv, err := proxy.New(cfg, state, tree)
 	if err != nil {
 		return fmt.Errorf("build proxy: %w", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "tokenctl %s — proxy on %s, metrics on %s%s, store %s\n",

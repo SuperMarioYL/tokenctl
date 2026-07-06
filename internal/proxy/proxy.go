@@ -116,6 +116,32 @@ const statusClientClosedRequest = 499
 // bytes are written.
 var errPreempted = errors.New("tokenctl: preempted")
 
+// errMidStreamPreempt is returned from the SSE metered reader when the arbiter
+// preempts AFTER response headers have already been flushed to the client. The
+// 200 status line can no longer be rewritten to 499, so the mid-stream path
+// makes the preemption detectable a different way: it injects a terminating
+// SSE `event: error` frame carrying reason=preempted_by_sibling, then returns
+// this non-EOF error so httputil.ReverseProxy's copy loop aborts the stream
+// non-gracefully (a truncated body ending in an error frame, NOT a clean EOF
+// indistinguishable from a normal short completion). A well-behaved SSE client
+// that reads to EOF sees the error event before the connection drops.
+//
+// This is the deferred half of the v0.4.0 preemption contract: pre-header
+// preempts still emit 499 (see ModifyResponse/ErrorHandler + statusClient
+// ClosedRequest); mid-stream preempts emit the SSE error frame instead.
+var errMidStreamPreempt = errors.New("tokenctl: preempted mid-stream")
+
+// midStreamPreemptData is the SSE `data:` payload the mid-stream error frame
+// carries. Kept in one place so the reader and its regression test agree on the
+// exact contract bytes.
+const midStreamPreemptData = `{"reason":"preempted_by_sibling"}`
+
+// midStreamPreemptEvent is the full terminating SSE frame injected into the
+// client byte stream when a preempt lands after headers are flushed. It is a
+// standalone, self-terminating event (trailing blank line) so it frames
+// cleanly even if it is appended right after a partial upstream chunk.
+var midStreamPreemptEvent = []byte("event: error\ndata: " + midStreamPreemptData + "\n\n")
+
 // Server holds the runtime state. Construct with New, run with Run.
 type Server struct {
 	cfg       *config.Config
@@ -343,7 +369,19 @@ func (s *Server) reverseProxy(prov providers.Provider, adm Admission, w http.Res
 		switch {
 		case isSSE(ct):
 			resp.Header.Del("Content-Length")
-			resp.Body = newSSEMeteredReader(resp.Body, meter, adm, s.metrics, provName)
+			sr := newSSEMeteredReader(resp.Body, meter, adm, s.metrics, provName).(*sseMeteredReader)
+			// Record which preempt path fired: a mid-stream preempt injects a
+			// terminating SSE error frame (this callback) rather than the
+			// pre-header 499 emitted upstream in ErrorHandler, so the two branches
+			// stay observable (fix-mid-stream-preempt-surfaces-truncated-200-not-
+			// 499).
+			groupPath := adm.GroupPath()
+			sr.onMidStreamPreempt = func() {
+				s.metrics.PreemptSignals.WithLabelValues("mid_stream").Inc()
+				s.logger.Info("preempt surfaced mid-stream via SSE error frame",
+					"group", groupPath, "provider", provName, "reason", "preempted_by_sibling")
+			}
+			resp.Body = sr
 		case isJSON(ct):
 			resp.Body = newJSONMeteredReader(resp.Body, meter, adm, s.metrics, provName)
 		}
@@ -361,6 +399,11 @@ func (s *Server) reverseProxy(prov providers.Provider, adm Admission, w http.Res
 		// a deliberate preempt, not a generic 502
 		// (fix-preemption-not-wired-to-upstream).
 		if adm.Preempted() {
+			// Pre-header preempt path: no client bytes were written yet, so the
+			// status line can still be set to 499. Recorded under "pre_header" so
+			// it's distinguishable from the mid-stream SSE-error-frame path
+			// (fix-mid-stream-preempt-surfaces-truncated-200-not-499).
+			s.metrics.PreemptSignals.WithLabelValues("pre_header").Inc()
 			rw.Header().Set("X-TokenCtl-Reason", "preempted_by_sibling")
 			rw.Header().Set("X-TokenCtl-Group", adm.GroupPath())
 			rw.Header().Set("X-TokenCtl-Provider", provName)
@@ -459,6 +502,25 @@ type sseMeteredReader struct {
 
 	pending bytes.Buffer
 	mu      sync.Mutex
+
+	// streamed latches once at least one byte has been forwarded to the client,
+	// i.e. once the 200 status line + headers are irrevocably committed. It is
+	// what distinguishes a pre-header preempt (handled as 499 upstream in
+	// ModifyResponse/ErrorHandler) from a mid-stream one that must instead be
+	// surfaced via the injected SSE error frame.
+	streamed atomic.Bool
+	// midStreamStarted latches once the terminating error frame has begun
+	// emitting so the frame injection happens exactly once even if the arbiter
+	// keeps the preempt latched across many Reads.
+	midStreamStarted atomic.Bool
+	// errFrameLeft holds any bytes of the injected error frame that did not fit
+	// in the caller's buffer on the first mid-stream Read; guarded by mu.
+	errFrameLeft []byte
+	// onMidStreamPreempt, if set, is called exactly once when the mid-stream error
+	// frame is emitted. It lets the proxy record that the mid-stream path (rather
+	// than the pre-header 499 path) fired for this request, keeping the two
+	// branches observable.
+	onMidStreamPreempt func()
 }
 
 func newSSEMeteredReader(src io.ReadCloser, m providers.Meter, a Admission, mm *metrics, prov string) io.ReadCloser {
@@ -466,14 +528,77 @@ func newSSEMeteredReader(src io.ReadCloser, m providers.Meter, a Admission, mm *
 }
 
 func (r *sseMeteredReader) Read(p []byte) (int, error) {
+	// If the arbiter preempted this request after headers were already flushed
+	// (streamed==true), the 200 status line can no longer be rewritten to 499.
+	// Surface the preempt to the client instead by injecting a terminating SSE
+	// error frame and then failing the copy non-gracefully so the body ends in
+	// an error event, not a clean EOF (fix-mid-stream-preempt-surfaces-truncated
+	// -200-not-499). This top guard handles the case where the preempt latched
+	// between two Reads (src is idle).
+	if r.adm.Preempted() && r.streamed.Load() {
+		return r.emitPreemptFrame(p)
+	}
+
 	n, err := r.src.Read(p)
 	if n > 0 {
+		r.streamed.Store(true)
 		r.consume(p[:n])
 	}
 	if errors.Is(err, io.EOF) {
 		r.flush()
 	}
+	// The common mid-stream trigger: cancelling the admission context tears the
+	// upstream connection down, so the src.Read we were blocked in returns an
+	// error (EOF / context-cancelled / connection reset) *in the same call* the
+	// preempt fired. A raw EOF here would look to the client like a clean short
+	// completion — exactly the undetectable truncated-200 this fix closes. When
+	// preempted mid-stream, forward whatever real bytes we got first, then begin
+	// the injected error frame on the next Read (bytes and the frame can't share
+	// one Read return, which carries a single (n, err) pair).
+	if err != nil && r.adm.Preempted() && r.streamed.Load() {
+		if n > 0 {
+			return n, nil
+		}
+		return r.emitPreemptFrame(p)
+	}
 	return n, err
+}
+
+// emitPreemptFrame writes the terminating SSE error frame into p across as many
+// Reads as the caller's buffer size requires, then returns errMidStreamPreempt
+// so ReverseProxy's copy loop aborts the client stream non-gracefully. It is
+// idempotent: the frame is emitted exactly once even though the preempt stays
+// latched across every subsequent Read.
+func (r *sseMeteredReader) emitPreemptFrame(p []byte) (int, error) {
+	if r.midStreamStarted.CompareAndSwap(false, true) {
+		if r.onMidStreamPreempt != nil {
+			r.onMidStreamPreempt()
+		}
+		n := copy(p, midStreamPreemptEvent)
+		if n < len(midStreamPreemptEvent) {
+			// Caller buffer smaller than the whole frame: forward what fits now
+			// and stash the remainder for subsequent Reads before erroring.
+			r.mu.Lock()
+			r.errFrameLeft = append([]byte(nil), midStreamPreemptEvent[n:]...)
+			r.mu.Unlock()
+			return n, nil
+		}
+		return n, errMidStreamPreempt
+	}
+	// Frame already started: drain any stashed remainder, then error.
+	r.mu.Lock()
+	if len(r.errFrameLeft) > 0 {
+		n := copy(p, r.errFrameLeft)
+		r.errFrameLeft = r.errFrameLeft[n:]
+		left := len(r.errFrameLeft)
+		r.mu.Unlock()
+		if left > 0 {
+			return n, nil
+		}
+		return n, errMidStreamPreempt
+	}
+	r.mu.Unlock()
+	return 0, errMidStreamPreempt
 }
 
 func (r *sseMeteredReader) Close() error {
@@ -817,6 +942,11 @@ type metrics struct {
 	OutputTokens    *prometheus.CounterVec
 	DurationSeconds *prometheus.HistogramVec
 	InFlightGauge   prometheus.Gauge
+	// PreemptSignals counts how each preempt was surfaced to the client:
+	// "pre_header" (499 status, no bytes streamed yet) vs "mid_stream" (SSE
+	// error frame injected after headers were flushed). Keeps both branches of
+	// the preemption contract observable.
+	PreemptSignals *prometheus.CounterVec
 }
 
 func newMetrics() *metrics {
@@ -861,6 +991,14 @@ func newMetrics() *metrics {
 			Name:      "requests_in_flight",
 			Help:      "Number of requests currently held by the proxy.",
 		}),
+		PreemptSignals: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "tokenctl",
+				Name:      "preempt_signals_total",
+				Help:      "Preempts surfaced to the client, by path: pre_header (499) vs mid_stream (SSE error frame).",
+			},
+			[]string{"path"},
+		),
 	}
 	reg.MustRegister(
 		m.RequestsTotal,
@@ -868,6 +1006,7 @@ func newMetrics() *metrics {
 		m.OutputTokens,
 		m.DurationSeconds,
 		m.InFlightGauge,
+		m.PreemptSignals,
 	)
 	return m
 }

@@ -106,8 +106,8 @@ type Tree struct {
 
 	state State
 
-	mu                sync.Mutex
-	walletConsumed    int64
+	mu             sync.Mutex
+	walletConsumed int64
 	// walletReserved mirrors walletConsumed for in-flight admissions: the sum
 	// of per-request reserve estimates not yet credited to walletConsumed. The
 	// wallet admission gate compares walletConsumed + walletReserved against

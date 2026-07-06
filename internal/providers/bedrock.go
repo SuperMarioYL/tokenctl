@@ -20,7 +20,7 @@ func init() {
 //
 //   - POST /model/{modelId}/invoke              (non-streamed JSON, model-native body)
 //   - POST /model/{modelId}/invoke-with-response-stream
-//                                                (AWS event-stream, binary framing)
+//     (AWS event-stream, binary framing)
 //   - POST /model/{modelId}/converse             (non-streamed, unified schema)
 //   - POST /model/{modelId}/converse-stream      (SSE-shaped converse stream)
 //

@@ -6,6 +6,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-06
+
+Wiring-correctness pass. Two fixes found by re-reading the shipped source: the
+live `tokenctl up` proxy never bound its API keys or wallet (so it 401'd all
+real traffic), and a mid-stream preempt was surfacing as an undetectable
+truncated 200. No new surface area; end-to-end / regression tests for each.
+
+### Fixed
+- **`tokenctl up` now admits real traffic and enforces the wallet cap.**
+  `runProxy` built the budget tree with `budget.NewTree` but never called
+  `tree.BindAll(cfg.APIKeys)` or `tree.SetWallet(cfg.Wallet)`, so the live proxy
+  launched via `tokenctl up` had an empty `leafByKey` — every request missed the
+  leaf lookup and got `401 unknown_key` — and a nil `walletBudget`, making the
+  advertised org wallet cap a silent no-op. Only the unit tests worked, because
+  they call `tr.Bind` directly. `runProxy` now binds all configured keys and the
+  wallet immediately after `NewTree` (the wallet call is a no-op when no
+  `wallet` block is configured, so wallet-less configs still start) (HIGH).
+- **A mid-stream preempt is no longer an undetectable truncated 200.** Pre-header
+  preemption already emits `499` + `X-TokenCtl-Reason: preempted_by_sibling`, but
+  once response headers were flushed the 200 status line could not be rewritten,
+  so an arbiter preempt mid-stream just closed the connection — a truncated body
+  indistinguishable from a normal short completion. The SSE metered reader now
+  detects a preempt after streaming has begun, injects a terminating
+  `event: error` / `data: {"reason":"preempted_by_sibling"}` SSE frame into the
+  client stream, and fails the copy with a non-EOF error so the stream ends
+  non-gracefully (not a clean EOF). Which path fired — pre-header `499` vs
+  mid-stream error frame — is recorded on the new `tokenctl_preempt_signals_total`
+  counter (`path="pre_header"` / `path="mid_stream"`) so both branches are
+  observable (MEDIUM).
+
+### Added
+- Go tests: `cmd/tokenctl/main_test.go` starts the real `runProxy` from an
+  on-disk config against an httptest upstream and asserts a bound key is admitted
+  (non-401, reaches the upstream, stamped with its leaf) and that the wallet cap
+  hard-denies over-cap traffic with `X-TokenCtl-Reason: budget_exceeded`, plus a
+  wallet-less config still starts and admits; `internal/proxy/mid_stream_preempt_test.go`
+  covers the injected error frame at the reader level (including a client buffer
+  smaller than the frame) and end-to-end through the reverse proxy, asserting the
+  client sees a 200 whose body ends in the `event: error` frame and that the
+  `mid_stream` preempt-signal counter incremented.
+
 ## [0.4.0] - 2026-07-03
 
 Correctness-hardening pass. Two targeted fixes found by re-reading the shipped
