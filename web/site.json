@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "name": "tokenctl",
+  "github": "https://github.com/SuperMarioYL/tokenctl",
+  "host": "tokenctl.lei6393.com",
+  "lang": { "primary": "zh", "toggle": true },
+  "accent": ["#14b8a6", "#0e9488", "#5e5ce6"],
+  "hero": {
+    "eyebrow": { "zh": "反代 · 预算树 · 抢占", "en": "Reverse proxy · Budget tree · Preempt" },
+    "headline": { "zh": "给 Agent 的 token\n装上 cgroups", "en": "cgroups for your\nagent's tokens" },
+    "sub": {
+      "zh": "tokenctl 是一个反代 Claude / OpenAI / Bedrock 的 Go 二进制，按 org → team → dev 预算树实时归账，越线软节流，超额硬拒绝，抢占式让权给高权重节点。",
+      "en": "tokenctl is a single Go binary that reverse-proxies Claude, OpenAI and Bedrock, accounts every streamed token against an org → team → dev budget tree, soft-throttles at the line, hard-denies over it, and preempts for higher-weight nodes."
+    },
+    "command": "go build -o tokenctl ./cmd/tokenctl",
+    "ctaGithub": { "zh": "在 GitHub 查看", "en": "View on GitHub" },
+    "scroll": { "zh": "向下滚动", "en": "Scroll" }
+  },
+  "advantages": [
+    {
+      "title": { "zh": "反代逐 token 计量", "en": "Per-token metering proxy" },
+      "body": {
+        "zh": "internal/proxy 反代 Claude / OpenAI / Bedrock，解析流式 SSE 响应逐 token 计量，计量增量实时回流到每个 leaf 节点。",
+        "en": "internal/proxy reverse-proxies Claude, OpenAI and Bedrock, parsing the streamed SSE response to meter token by token, with the deltas flowing back to each leaf node in real time."
+      },
+      "chips": ["› SSE per-token", "› Claude · OpenAI · Bedrock"]
+    },
+    {
+      "title": { "zh": "org → team → dev 预算树", "en": "org → team → dev budget tree" },
+      "body": {
+        "zh": "internal/budget 跑一棵递归预算树的单仲裁 goroutine：准入、超 80% 软节流、超 100% 硬拒绝（429 + X-TokenCtl-Reason）。",
+        "en": "internal/budget runs a single arbiter goroutine over a recursive budget tree: admit, soft-throttle past 80%, hard-deny past 100% (429 + X-TokenCtl-Reason)."
+      },
+      "chips": ["› soft-throttle 80%", "› 429 hard deny"]
+    },
+    {
+      "title": { "zh": "加权抢占", "en": "Weighted preemption" },
+      "body": {
+        "zh": "当高权重兄弟节点缺粮时，仲裁器会抢占在飞的低权重请求，把 slack 让给更重要的流量 —— 不是先到先得的静态配额。",
+        "en": "When a higher-weight sibling starves, the arbiter preempts in-flight lower-weight requests and hands the slack to the more important traffic — not a static first-come quota."
+      },
+      "chips": ["› weight-based", "› preempts in-flight"]
+    },
+    {
+      "title": { "zh": "一个二进制，零外部依赖", "en": "One binary, no external deps" },
+      "body": {
+        "zh": "internal/store 用内嵌 BoltDB 持久化窗口内计数与 append-only 审计日志；Prometheus /metrics 与 tokenctl top 暴露实时状态。没有外部 DB、没有消息队列。",
+        "en": "internal/store persists windowed counts and an append-only audit log in embedded BoltDB; Prometheus /metrics and tokenctl top expose live state. No external DB, no message queue."
+      },
+      "chips": ["› embedded BoltDB", "› Prometheus /metrics"]
+    }
+  ],
+  "scene": { "kind": "hub-nodes", "nodes": ["Claude", "OpenAI", "Bedrock"] },
+  "cta": {
+    "headline": { "zh": "把 Agent 账单管起来", "en": "Govern the agent bill" },
+    "sub": {
+      "zh": "Apache-2.0 许可；一份 YAML 描述预算树，把 ANTHROPIC_BASE_URL 指过来即可执行。",
+      "en": "Apache-2.0 licensed; one YAML describes the budget tree, point ANTHROPIC_BASE_URL at it to enforce."
+    },
+    "button": { "zh": "在 GitHub 查看", "en": "View on GitHub" }
+  },
+  "footer": { "tag": { "zh": "开源 · Apache-2.0", "en": "Open source · Apache-2.0" } }
+}
