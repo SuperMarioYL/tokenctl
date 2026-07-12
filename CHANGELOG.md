@@ -6,6 +6,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-13
+
+Observability pass. One fix found by re-reading the shipped source: the m3
+preemption count — the product's headline signal — was tracked by the proxy but
+never shown in the `tokenctl top` live view.
+
+### Fixed
+- **`tokenctl top` now shows the preempt count.** The proxy's `/v1/snapshot`
+  already serialised `preempts_total` (and the Prometheus collector exposed
+  `tokenctl_preempts_total`), but the `tokenctl top` client struct had no
+  matching field and the header printed only `throttles` and `denies`. So every
+  arbiter preemption — the m3 headline the demo asciinema centres on — was
+  silently dropped on decode and invisible in the live view operators watch. The
+  header now reads `… throttles=N denies=N preempts=N`, and the snapshot field
+  round-trips into the CLI (MEDIUM).
+
+### Added
+- Go test: `cmd/tokenctl/render_top_test.go` decodes a `/v1/snapshot` body
+  carrying `preempts_total` and asserts the count round-trips into the client
+  struct and appears in the rendered header (alongside the existing
+  throttles / denies / in-flight signals).
+
 ## [0.5.0] - 2026-07-06
 
 Wiring-correctness pass. Two fixes found by re-reading the shipped source: the
@@ -176,6 +198,10 @@ First public cut. Three milestones land together as the v0.1 control plane.
 - Bilingual README (简体中文 primary, English sibling), Apache-2.0 license, GitHub
   Actions CI.
 
-[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SuperMarioYL/tokenctl/releases/tag/v0.1.0

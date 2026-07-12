@@ -35,7 +35,7 @@ import (
 //
 //	go build -ldflags "-X main.Version=v0.1.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "0.2.0-dev"
+	Version = "0.6.0-dev"
 	Commit  = "unknown"
 )
 
@@ -243,6 +243,7 @@ type topSnapshot struct {
 	InFlight    int         `json:"in_flight"`
 	Denies      int64       `json:"denies_total"`
 	Throttles   int64       `json:"throttles_total"`
+	Preempts    int64       `json:"preempts_total"`
 	Providers   []topByName `json:"providers,omitempty"`
 }
 
@@ -325,8 +326,8 @@ const ansiClear = "\033[H\033[2J"
 
 func renderTop(out io.Writer, snap *topSnapshot) {
 	fmt.Fprint(out, ansiClear)
-	fmt.Fprintf(out, "tokenctl top  %s  in-flight=%d  throttles=%d  denies=%d\n",
-		snap.GeneratedAt.Format(time.RFC3339), snap.InFlight, snap.Throttles, snap.Denies)
+	fmt.Fprintf(out, "tokenctl top  %s  in-flight=%d  throttles=%d  denies=%d  preempts=%d\n",
+		snap.GeneratedAt.Format(time.RFC3339), snap.InFlight, snap.Throttles, snap.Denies, snap.Preempts)
 	if snap.Wallet != nil {
 		fmt.Fprintf(out, "wallet: %s  (%s)\n",
 			fmtBar(snap.Wallet.Frac, 32),

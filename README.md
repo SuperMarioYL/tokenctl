@@ -77,7 +77,7 @@ go build -o tokenctl ./cmd/tokenctl
 <details><summary>tokenctl top 示例输出</summary>
 
 ```
-tokenctl top  2026-06-05T03:42:11Z  in-flight=1  throttles=0  denies=0
+tokenctl top  2026-06-05T03:42:11Z  in-flight=1  throttles=0  denies=0  preempts=0
 wallet: [██······························]  (4.2k / 20.00M = 0%)
 ────────────────────────────────────────────────────────────────────────────────
 GROUP                             WEIGHT  USAGE       BUDGET      STATE

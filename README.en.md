@@ -83,7 +83,7 @@ You'll see per-leaf tokens tick in real time as the SSE stream from Claude reach
 <details><summary>sample <code>tokenctl top</code> output</summary>
 
 ```
-tokenctl top  2026-06-05T03:42:11Z  in-flight=1  throttles=0  denies=0
+tokenctl top  2026-06-05T03:42:11Z  in-flight=1  throttles=0  denies=0  preempts=0
 wallet: [██······························]  (4.2k / 20.00M = 0%)
 ────────────────────────────────────────────────────────────────────────────────
 GROUP                             WEIGHT  USAGE       BUDGET      STATE
