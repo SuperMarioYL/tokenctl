@@ -6,56 +6,56 @@
   "lang": { "primary": "zh", "toggle": true },
   "accent": ["#14b8a6", "#0e9488", "#5e5ce6"],
   "hero": {
-    "eyebrow": { "zh": "反代 · 预算树 · 抢占", "en": "Reverse proxy · Budget tree · Preempt" },
-    "headline": { "zh": "给 Agent 的 token\n装上 cgroups", "en": "cgroups for your\nagent's tokens" },
+    "eyebrow": { "zh": "预算 · 刹车 · 让路", "en": "Budget · Brake · Yield" },
+    "headline": { "zh": "你的 AI 账单\n终于有了刹车", "en": "Your AI bill\nfinally has a brake" },
     "sub": {
-      "zh": "tokenctl 是一个反代 Claude / OpenAI / Bedrock 的 Go 二进制，按 org → team → dev 预算树实时归账，越线软节流，超额硬拒绝，抢占式让权给高权重节点。",
-      "en": "tokenctl is a single Go binary that reverse-proxies Claude, OpenAI and Bedrock, accounts every streamed token against an org → team → dev budget tree, soft-throttles at the line, hard-denies over it, and preempts for higher-weight nodes."
+      "zh": "CFO 把全公司的 AI 账单交给你？按团队、按人设硬上限：快到顶自动减速、超额直接拒掉、重要的人优先跑。给平台 / DevEx 团队的真预算控制器——不止给你看账单，真的把花销管住。",
+      "en": "When the CFO hands you the whole company's AI bill, set hard ceilings per team and per dev: it auto-slows near the line, refuses past it, and lets the important people go first. A real budget controller for platform / DevEx teams — not just a bill to read, an actual brake on the spend."
     },
-    "command": "go build -o tokenctl ./cmd/tokenctl",
+    "command": "./tokenctl up -c tokenctl.yaml",
     "ctaGithub": { "zh": "在 GitHub 查看", "en": "View on GitHub" },
     "scroll": { "zh": "向下滚动", "en": "Scroll" }
   },
   "advantages": [
     {
-      "title": { "zh": "反代逐 token 计量", "en": "Per-token metering proxy" },
+      "title": { "zh": "刹车，不只是账单", "en": "A brake, not just a bill" },
       "body": {
-        "zh": "internal/proxy 反代 Claude / OpenAI / Bedrock，解析流式 SSE 响应逐 token 计量，计量增量实时回流到每个 leaf 节点。",
-        "en": "internal/proxy reverse-proxies Claude, OpenAI and Bedrock, parsing the streamed SSE response to meter token by token, with the deltas flowing back to each leaf node in real time."
+        "zh": "别的工具月底才送来一张账单——钱已经花完了。tokenctl 在每个请求发出去之前就按预算卡住：快到上限自动排队减速，超过直接拒掉，预算花不出去。",
+        "en": "Other tools hand you a bill at month's end — after the money's already gone. tokenctl checks every request against the budget before it leaves: queues and slows near the ceiling, refuses past it. The budget can't be blown."
       },
-      "chips": ["› SSE per-token", "› Claude · OpenAI · Bedrock"]
+      "chips": ["› 花前就拦", "› 越线即停"]
     },
     {
-      "title": { "zh": "org → team → dev 预算树", "en": "org → team → dev budget tree" },
+      "title": { "zh": "重要的事，先跑", "en": "Important work goes first" },
       "body": {
-        "zh": "internal/budget 跑一棵递归预算树的单仲裁 goroutine：准入、超 80% 软节流、超 100% 硬拒绝（429 + X-TokenCtl-Reason）。",
-        "en": "internal/budget runs a single arbiter goroutine over a recursive budget tree: admit, soft-throttle past 80%, hard-deny past 100% (429 + X-TokenCtl-Reason)."
+        "zh": "不是先到先得的死配额。当关键团队预算吃紧，tokenctl 会主动让掉手头不重要的在飞请求，把额度腾给更要紧的流量——关键发版不会被摸鱼请求拖死。",
+        "en": "Not a static first-come quota. When a critical team runs short, tokenctl yields the unimportant in-flight requests and hands the slack to the urgent traffic — so a critical rollout isn't starved by a trivial one."
       },
-      "chips": ["› soft-throttle 80%", "› 429 hard deny"]
+      "chips": ["› 重要先跑", "› 主动让路"]
     },
     {
-      "title": { "zh": "加权抢占", "en": "Weighted preemption" },
+      "title": { "zh": "所有 AI 模型，一个钱包", "en": "All your AI models, one wallet" },
       "body": {
-        "zh": "当高权重兄弟节点缺粮时，仲裁器会抢占在飞的低权重请求，把 slack 让给更重要的流量 —— 不是先到先得的静态配额。",
-        "en": "When a higher-weight sibling starves, the arbiter preempts in-flight lower-weight requests and hands the slack to the more important traffic — not a static first-come quota."
+        "zh": "不用在每个后台分别设上限、分别看账单。tokenctl 把公司用的所有 AI 流量汇成一份预算——一个总数管住所有模型，谁超谁让。",
+        "en": "No need to set separate ceilings in every console or juggle separate bills. tokenctl rolls all your company's AI traffic into one budget — one number governs every model, and whoever goes over yields."
       },
-      "chips": ["› weight-based", "› preempts in-flight"]
+      "chips": ["› 一个总数", "› 多模型合一"]
     },
     {
-      "title": { "zh": "一个二进制，零外部依赖", "en": "One binary, no external deps" },
+      "title": { "zh": "工程团队真能装上", "en": "A platform team can actually install it" },
       "body": {
-        "zh": "internal/store 用内嵌 BoltDB 持久化窗口内计数与 append-only 审计日志；Prometheus /metrics 与 tokenctl top 暴露实时状态。没有外部 DB、没有消息队列。",
-        "en": "internal/store persists windowed counts and an append-only audit log in embedded BoltDB; Prometheus /metrics and tokenctl top expose live state. No external DB, no message queue."
+        "zh": "不用搭数据库、消息队列，也不用起第二个进程。一份配置写好你的预算结构，把现有 agent 入口指过来就开始执行——平台团队一下午就能上线。",
+        "en": "No database, message queue, or second process to stand up. One config file describes your budget structure; point your existing agents at it and enforcement starts — a platform team can ship it in an afternoon."
       },
-      "chips": ["› embedded BoltDB", "› Prometheus /metrics"]
+      "chips": ["› 不用搭数据库", "› 配好即生效"]
     }
   ],
   "scene": { "kind": "hub-nodes", "nodes": ["Claude", "OpenAI", "Bedrock"] },
   "cta": {
-    "headline": { "zh": "把 Agent 账单管起来", "en": "Govern the agent bill" },
+    "headline": { "zh": "把公司的 AI 账单管起来", "en": "Take control of the company AI bill" },
     "sub": {
-      "zh": "Apache-2.0 许可；一份 YAML 描述预算树，把 ANTHROPIC_BASE_URL 指过来即可执行。",
-      "en": "Apache-2.0 licensed; one YAML describes the budget tree, point ANTHROPIC_BASE_URL at it to enforce."
+      "zh": "Apache-2.0 开源；一份配置写好预算结构，把现有 agent 入口指过来就开始执行。",
+      "en": "Apache-2.0 licensed; one config file describes the budget, point your existing agents at it and enforcement begins."
     },
     "button": { "zh": "在 GitHub 查看", "en": "View on GitHub" }
   },
