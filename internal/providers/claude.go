@@ -113,9 +113,26 @@ func (c *ClaudeProvider) Upstream() *url.URL { return c.upstream }
 
 // Matches recognises the Messages and legacy Complete endpoints. The proxy
 // scans providers in registration order; first match wins.
+//
+// The legacy /v1/complete match is boundary-aware: a literal HasPrefix on
+// "/v1/complete" would also claim OpenAI's "/v1/completions" endpoint (which
+// is a longer string sharing the prefix), and since the default config lists
+// claude before openai, first-match would hand POST /v1/completions to Claude
+// — which reverse-proxies to api.anthropic.com, a host that does not serve
+// that path. We therefore require a path boundary (end-of-string, "/", or "?")
+// after "/v1/complete" so /v1/completions falls through to the OpenAI provider.
+// /v1/messages has no overlapping sibling and keeps the plain HasPrefix match.
 func (c *ClaudeProvider) Matches(r *http.Request) bool {
 	p := r.URL.Path
-	return strings.HasPrefix(p, "/v1/messages") || strings.HasPrefix(p, "/v1/complete")
+	if strings.HasPrefix(p, "/v1/messages") {
+		return true
+	}
+	// Boundary-aware match for the legacy /v1/complete endpoint so the OpenAI
+	// /v1/completions path is NOT claimed by Claude.
+	if p == "/v1/complete" || strings.HasPrefix(p, "/v1/complete/") || strings.HasPrefix(p, "/v1/complete?") {
+		return true
+	}
+	return false
 }
 
 // APIKeyFromRequest prefers the Anthropic-native x-api-key header but accepts

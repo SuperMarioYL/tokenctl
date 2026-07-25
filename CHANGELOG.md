@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-26
+
+Provider-routing correctness pass. One fix found by re-reading the shipped
+source: the legacy Claude `/v1/complete` match used a plain prefix check that
+also claimed OpenAI's `/v1/completions` endpoint, breaking that traffic under
+the default claude-first provider ordering.
+
+### Fixed
+- **`POST /v1/completions` now routes to the OpenAI provider instead of being
+  claimed by Claude.** `ClaudeProvider.Matches` matched `/v1/complete` with a
+  literal `strings.HasPrefix`, but `/v1/complete` is a prefix of OpenAI's legacy
+  `/v1/completions` endpoint. Since `(*Server).matchProvider` scans providers in
+  config order and the shipped sample/default config lists `claude` before
+  `openai`, first-match won and any `POST /v1/completions` request was claimed by
+  Claude, reverse-proxied to api.anthropic.com (which does not serve that path),
+  and the OpenAI provider never saw it — the request broke. The match is now
+  boundary-aware: `/v1/complete` is accepted only when followed by end-of-string,
+  `/`, or `?`, so `/v1/completions` falls through to the OpenAI provider.
+  `/v1/messages` keeps its plain prefix match (no overlapping sibling) (MEDIUM).
+
+### Added
+- Go test: `internal/proxy/match_provider_test.go` builds the real
+  `ClaudeProvider` / `OpenAIProvider` in the default claude-first order and
+  asserts ordered first-match resolution — `POST /v1/completions` → openai,
+  while `POST /v1/complete` and `POST /v1/messages` still → claude.
+
 ## [0.6.0] - 2026-07-13
 
 Observability pass. One fix found by re-reading the shipped source: the m3
