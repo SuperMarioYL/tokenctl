@@ -39,7 +39,7 @@
         "zh": "不用在每个后台分别设上限、分别看账单。tokenctl 把公司用的所有 AI 流量汇成一份预算——一个总数管住所有模型，谁超谁让。",
         "en": "No need to set separate ceilings in every console or juggle separate bills. tokenctl rolls all your company's AI traffic into one budget — one number governs every model, and whoever goes over yields."
       },
-      "chips": ["› 一个总数", "› 多模型合一"]
+      "chips": ["› 一个总数", "› 多模型合一", "› 各走各的道"]
     },
     {
       "title": { "zh": "工程团队真能装上", "en": "A platform team can actually install it" },
