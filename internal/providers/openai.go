@@ -61,7 +61,9 @@ func (o *OpenAIProvider) APIKeyFromRequest(r *http.Request) string {
 }
 
 // NewMeter builds a per-request Meter that tracks usage high-water marks
-// across the unnamed SSE data events OpenAI emits.
+// across the unnamed SSE data events Chat Completions emits and the typed
+// response.completed event the Responses API streams (whose usage is nested
+// under response.usage).
 func (o *OpenAIProvider) NewMeter() Meter { return &openaiMeter{} }
 
 type openaiMeter struct {
@@ -79,7 +81,27 @@ type openaiMeter struct {
 // Each chunk is the JSON body of one data: line. The Responses API streams a
 // similar shape, except the usage block uses {input_tokens, output_tokens}
 // (matching Anthropic-style naming). We accept either.
+//
+// The Responses API differs from Chat Completions in that it streams TYPED
+// SSE events (response.created, response.output_text.delta, response.completed,
+// ...). Only the terminal response.completed event carries usage, and it is
+// NESTED under response.usage rather than at the top level (the non-streaming
+// /v1/responses body, by contrast, carries usage at the top level). Before
+// fix-openai-responses-streaming-not-metered, Observe blanket-returned 0,0 for
+// every named event and only looked at top-level usage, so a streaming
+// /v1/responses request was attributed zero tokens and silently bypassed the
+// org cap + node budgets. We now also parse the nested response.usage on the
+// response.completed event.
 type openaiChunkEnvelope struct {
+	Usage *openaiUsage `json:"usage,omitempty"`
+	// Response captures the Responses API streaming envelope, whose usage lives
+	// one level deeper under response.usage. Nil for Chat Completions chunks.
+	Response *openaiResponsesEnvelope `json:"response,omitempty"`
+}
+
+// openaiResponsesEnvelope is the inner "response" object carried by Responses
+// API streaming events; only its Usage field matters for metering.
+type openaiResponsesEnvelope struct {
 	Usage *openaiUsage `json:"usage,omitempty"`
 }
 
@@ -91,9 +113,15 @@ type openaiUsage struct {
 }
 
 func (m *openaiMeter) Observe(event string, data []byte) (int64, int64) {
-	// OpenAI uses unnamed events; ignore anything that came in with a name
-	// (Anthropic-shaped events would be handled by the Claude meter).
-	if event != "" {
+	// OpenAI Chat Completions streams unnamed data events (event == ""). The
+	// Responses API streams typed events; only response.completed carries usage
+	// (nested under response.usage). Every other named event (response.created,
+	// response.output_text.delta, ...) carries no usage, so we still skip it to
+	// avoid attributing spurious zero-deltas / parsing work per delta tick.
+	switch event {
+	case "", "response.completed":
+		// fall through — these are the events that can carry usage.
+	default:
 		return 0, 0
 	}
 	trimmed := bytes.TrimSpace(data)
@@ -104,16 +132,23 @@ func (m *openaiMeter) Observe(event string, data []byte) (int64, int64) {
 	if err := json.Unmarshal(trimmed, &c); err != nil {
 		return 0, 0
 	}
-	if c.Usage == nil {
+	// Usage appears at the top level for Chat Completions and the non-streaming
+	// Responses body, and nested under response.usage for the streaming
+	// response.completed event. Accept whichever position carries it.
+	u := c.Usage
+	if u == nil {
+		u = c.Response.Usage
+	}
+	if u == nil {
 		return 0, 0
 	}
-	in := c.Usage.PromptTokens
-	if c.Usage.InputTokens > in {
-		in = c.Usage.InputTokens
+	in := u.PromptTokens
+	if u.InputTokens > in {
+		in = u.InputTokens
 	}
-	out := c.Usage.CompletionTokens
-	if c.Usage.OutputTokens > out {
-		out = c.Usage.OutputTokens
+	out := u.CompletionTokens
+	if u.OutputTokens > out {
+		out = u.OutputTokens
 	}
 	return m.advance(in, out)
 }

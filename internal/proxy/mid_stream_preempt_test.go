@@ -242,3 +242,96 @@ func (b *blockingSSESource) Close() error {
 	b.closed.Store(true)
 	return nil
 }
+
+// oneChunkThenEOFSource yields `first` on the initial Read (n>0, nil) then
+// returns io.EOF on every subsequent Read. It stands in for an upstream
+// connection torn down by an arbiter preempt: with the JSON mid-stream-preempt
+// fix the reader's top guard intercepts Read 2 before this source is touched,
+// and without the fix Read 2 returns io.EOF — the silent truncated-200 the fix
+// closes (a clean EOF indistinguishable from a normal short completion). Using
+// a non-blocking source keeps the regression test revert-safe (no hang when the
+// fix is reverted and the top guard is gone).
+type oneChunkThenEOFSource struct {
+	first []byte
+	sent  bool
+}
+
+func (s *oneChunkThenEOFSource) Read(p []byte) (int, error) {
+	if !s.sent {
+		s.sent = true
+		return copy(p, s.first), nil
+	}
+	return 0, io.EOF
+}
+
+func (s *oneChunkThenEOFSource) Close() error { return nil }
+
+// TestJSONMeteredReader_MidStreamPreemptAbortsNonGraceful is the JSON-path
+// regression for fix-json-mid-stream-preempt-not-surfaced, mirroring
+// TestSSEMeteredReader_MidStreamPreemptInjectsErrorFrame over the JSON metered
+// reader. Once bytes have already been forwarded to the client (headers
+// flushed) a preempt can no longer rewrite the 200 status line to 499, and
+// unlike SSE there is no body frame to inject — so the reader must instead fire
+// the mid_stream counter and fail the copy with a non-EOF error, yielding a
+// truncated body the client fails to parse rather than a clean completion (NOT
+// a silent truncated 200). Must FAIL without the fix (clean EOF / silent
+// truncation), PASS with.
+func TestJSONMeteredReader_MidStreamPreemptAbortsNonGraceful(t *testing.T) {
+	// A source that yields one chunk of a JSON body, then EOF, so the test can
+	// preempt after the first chunk has been forwarded (headers committed).
+	src := &oneChunkThenEOFSource{
+		first: []byte(`{"id":"abc","data":"partial-body-still-arriving`),
+	}
+	adm := newFakeAdmission()
+	m := newMetrics()
+	rc := newJSONMeteredReader(src, &nopMeter{}, adm, m, "openai").(*jsonMeteredReader)
+
+	var fired atomic.Bool
+	// Mirror how reverseProxy wires the SSE reader's callback: the mid_stream
+	// PreemptSignals counter is incremented exactly once when the preempt is
+	// surfaced.
+	rc.onMidStreamPreempt = func() {
+		fired.Store(true)
+		m.PreemptSignals.WithLabelValues("mid_stream").Inc()
+	}
+
+	var client bytes.Buffer
+	buf := make([]byte, 4096)
+
+	// Read 1: forwards the first upstream chunk, latching streamed==true (the
+	// 200 status line + headers are now irrevocably committed).
+	n, err := rc.Read(buf)
+	if err != nil {
+		t.Fatalf("read 1: unexpected error %v", err)
+	}
+	client.Write(buf[:n])
+	if !rc.streamed.Load() {
+		t.Fatal("streamed not latched after first byte forwarded")
+	}
+
+	// Now the arbiter preempts mid-stream.
+	adm.pre.Store(true)
+
+	// Read 2: must surface the preempt as a non-EOF error (not a silent
+	// truncated 200) and fire the mid_stream counter callback. Without the fix
+	// this Read returns io.EOF (a clean, undetectable short completion).
+	n, err = rc.Read(buf)
+	client.Write(buf[:n])
+	if err == nil || err == io.EOF {
+		t.Fatalf("mid-stream read returned err=%v, want a non-nil non-EOF error", err)
+	}
+	if err != errMidStreamPreempt {
+		t.Fatalf("mid-stream read err = %v, want errMidStreamPreempt", err)
+	}
+	if !fired.Load() {
+		t.Fatal("onMidStreamPreempt callback was not invoked")
+	}
+	// The preempt must be observable: the mid_stream counter (not pre_header)
+	// increments — the same signal the SSE mid-stream path emits.
+	if got := testCounterValue(t, m.PreemptSignals, "mid_stream"); got != 1 {
+		t.Fatalf("mid_stream preempt signal counter = %v, want 1", got)
+	}
+	if got := testCounterValue(t, m.PreemptSignals, "pre_header"); got != 0 {
+		t.Fatalf("pre_header preempt signal counter = %v, want 0 (this was a mid-stream preempt)", got)
+	}
+}

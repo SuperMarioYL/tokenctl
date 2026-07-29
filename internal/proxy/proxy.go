@@ -383,7 +383,19 @@ func (s *Server) reverseProxy(prov providers.Provider, adm Admission, w http.Res
 			}
 			resp.Body = sr
 		case isJSON(ct):
-			resp.Body = newJSONMeteredReader(resp.Body, meter, adm, s.metrics, provName)
+			jr := newJSONMeteredReader(resp.Body, meter, adm, s.metrics, provName).(*jsonMeteredReader)
+			// Record which preempt path fired: a mid-stream preempt on a
+			// non-streamed JSON response aborts the copy non-gracefully here
+			// (a truncated body the client fails to parse) rather than the
+			// pre-header 499 emitted upstream in ErrorHandler, so the two
+			// branches stay observable (fix-json-mid-stream-preempt-not-surfaced).
+			groupPath := adm.GroupPath()
+			jr.onMidStreamPreempt = func() {
+				s.metrics.PreemptSignals.WithLabelValues("mid_stream").Inc()
+				s.logger.Info("preempt surfaced mid-stream via JSON body abort",
+					"group", groupPath, "provider", provName, "reason", "preempted_by_sibling")
+			}
+			resp.Body = jr
 		}
 		// Stamp every upstream response with the leaf we attributed it to —
 		// useful for debugging client-side why a particular request landed in
@@ -727,6 +739,16 @@ const maxUsageBufferBytes = 64 << 10
 // retains only a sliding TAIL of at most maxUsageBufferBytes — sufficient
 // because every provider shape places `usage` at the end of the body — instead
 // of the whole response.
+//
+// It also surfaces a mid-stream preempt (fix-json-mid-stream-preempt-not-surfaced):
+// once at least one body byte has been forwarded the 200 status line + headers
+// are irrevocably committed, so (like sseMeteredReader) a preempt can no longer
+// be rewritten to 499. Instead it fires onMidStreamPreempt (which the proxy
+// wires to increment tokenctl_preempt_signal_total{path="mid_stream"}) and
+// returns a non-EOF error so httputil's copy loop aborts non-gracefully — the
+// client sees a truncated body / JSON parse error rather than a clean
+// completion, and the preempt is counted. This is the JSON half of the v0.5.0
+// mid-stream-preempt contract, previously wired only into the SSE reader.
 type jsonMeteredReader struct {
 	src      io.ReadCloser
 	meter    providers.Meter
@@ -738,6 +760,22 @@ type jsonMeteredReader struct {
 	tail  []byte // last <= maxUsageBufferBytes bytes seen
 	total int64  // total bytes observed (for diagnostics)
 	done  atomic.Bool
+
+	// streamed latches once at least one byte has been forwarded to the client,
+	// i.e. once the 200 status line + headers are irrevocably committed. It is
+	// what distinguishes a pre-header preempt (handled as 499 upstream in
+	// ModifyResponse/ErrorHandler) from a mid-stream one that must instead be
+	// surfaced via the non-graceful abort here.
+	streamed atomic.Bool
+	// midStreamStarted latches once onMidStreamPreempt has fired so the
+	// callback (and the mid_stream counter it increments) runs exactly once
+	// even if the preempt stays latched across Reads.
+	midStreamStarted atomic.Bool
+	// onMidStreamPreempt, if set, is called exactly once when the mid-stream
+	// preempt is surfaced. It lets the proxy record that the mid-stream path
+	// (rather than the pre-header 499 path) fired for this request, keeping the
+	// two branches observable — mirroring sseMeteredReader.onMidStreamPreempt.
+	onMidStreamPreempt func()
 }
 
 func newJSONMeteredReader(src io.ReadCloser, m providers.Meter, a Admission, mm *metrics, prov string) io.ReadCloser {
@@ -752,14 +790,54 @@ func newJSONMeteredReader(src io.ReadCloser, m providers.Meter, a Admission, mm 
 }
 
 func (r *jsonMeteredReader) Read(p []byte) (int, error) {
+	// If the arbiter preempted this request after headers were already flushed
+	// (streamed==true), the 200 status line can no longer be rewritten to 499.
+	// Surface the preempt instead by counting it under "mid_stream" and
+	// aborting the copy non-gracefully (a non-EOF error) so the client sees a
+	// truncated body / JSON parse error rather than a clean completion
+	// (fix-json-mid-stream-preempt-not-surfaced). This top guard handles the
+	// case where the preempt latched between two Reads (src is idle).
+	if r.adm.Preempted() && r.streamed.Load() {
+		return r.emitMidStreamPreempt()
+	}
+
 	n, err := r.src.Read(p)
 	if n > 0 {
+		r.streamed.Store(true)
 		r.appendTail(p[:n])
 	}
 	if errors.Is(err, io.EOF) {
 		r.finalize()
 	}
+	// The common mid-stream trigger: cancelling the admission context tears the
+	// upstream connection down, so the src.Read we were blocked in returns an
+	// error (EOF / context-cancelled / connection reset) *in the same call* the
+	// preempt fired. A raw EOF / clean error here would read to the client like
+	// a normal short completion — exactly the undetectable truncated-200 this
+	// fix closes. When preempted mid-stream, forward whatever real bytes we got
+	// first, then surface the preempt on the next Read (bytes and the abort
+	// can't share one Read return, which carries a single (n, err) pair).
+	if err != nil && r.adm.Preempted() && r.streamed.Load() {
+		if n > 0 {
+			return n, nil
+		}
+		return r.emitMidStreamPreempt()
+	}
 	return n, err
+}
+
+// emitMidStreamPreempt fires the onMidStreamPreempt callback exactly once and
+// returns errMidStreamPreempt so ReverseProxy's copy loop aborts the client
+// stream non-gracefully. There is no body frame to inject for JSON (unlike the
+// SSE reader's terminating error event) — a truncated body that fails to parse
+// IS the client-visible signal — so the abort itself is the surface.
+func (r *jsonMeteredReader) emitMidStreamPreempt() (int, error) {
+	if r.midStreamStarted.CompareAndSwap(false, true) {
+		if r.onMidStreamPreempt != nil {
+			r.onMidStreamPreempt()
+		}
+	}
+	return 0, errMidStreamPreempt
 }
 
 // appendTail keeps only the last maxUsageBufferBytes bytes of the stream so
@@ -944,8 +1022,9 @@ type metrics struct {
 	InFlightGauge   prometheus.Gauge
 	// PreemptSignals counts how each preempt was surfaced to the client:
 	// "pre_header" (499 status, no bytes streamed yet) vs "mid_stream" (SSE
-	// error frame injected after headers were flushed). Keeps both branches of
-	// the preemption contract observable.
+	// error frame OR JSON body abort, injected after headers were flushed).
+	// Keeps both branches of the preemption contract observable for both the
+	// SSE and JSON response classes.
 	PreemptSignals *prometheus.CounterVec
 }
 
@@ -995,7 +1074,7 @@ func newMetrics() *metrics {
 			prometheus.CounterOpts{
 				Namespace: "tokenctl",
 				Name:      "preempt_signals_total",
-				Help:      "Preempts surfaced to the client, by path: pre_header (499) vs mid_stream (SSE error frame).",
+				Help:      "Preempts surfaced to the client, by path: pre_header (499) vs mid_stream (SSE error frame / JSON body abort).",
 			},
 			[]string{"path"},
 		),
