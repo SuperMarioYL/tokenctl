@@ -4,13 +4,13 @@
   "github": "https://github.com/SuperMarioYL/tokenctl",
   "host": "tokenctl.lei6393.com",
   "lang": { "primary": "zh", "toggle": true },
-  "accent": ["#14b8a6", "#0e9488", "#5e5ce6"],
+  "accent": ["#14b8a6", "#0d9488", "#0f766e"],
   "hero": {
-    "eyebrow": { "zh": "预算 · 刹车 · 让路", "en": "Budget · Brake · Yield" },
+    "eyebrow": { "zh": "预算 · 刹车 · 对账", "en": "Budget · Brake · Reconcile" },
     "headline": { "zh": "你的 AI 账单\n终于有了刹车", "en": "Your AI bill\nfinally has a brake" },
     "sub": {
-      "zh": "CFO 把全公司的 AI 账单交给你？按团队、按人设硬上限：快到顶自动减速、超额直接拒掉、重要的人优先跑。给平台 / DevEx 团队的真预算控制器——不止给你看账单，真的把花销管住。",
-      "en": "When the CFO hands you the whole company's AI bill, set hard ceilings per team and per dev: it auto-slows near the line, refuses past it, and lets the important people go first. A real budget controller for platform / DevEx teams — not just a bill to read, an actual brake on the spend."
+      "zh": "CFO 把全公司的 AI 账单交给你？按团队、按人设硬上限：快到顶自动减速、超额直接拒掉、重要的人优先跑。贵的模型单独设限、月底导出对账表、没花完的额度滚到下个月——给平台 / DevEx 团队的真预算控制器。",
+      "en": "When the CFO hands you the whole company's AI bill, set hard ceilings per team and per dev: it auto-slows near the line, refuses past it, and lets the important people go first. Cap the expensive models separately, export a month-end reconciliation table, and roll unspent budget forward — a real budget controller for platform / DevEx teams."
     },
     "command": "./tokenctl up -c tokenctl.yaml",
     "ctaGithub": { "zh": "在 GitHub 查看", "en": "View on GitHub" },
@@ -34,28 +34,36 @@
       "chips": ["› 重要先跑", "› 主动让路"]
     },
     {
-      "title": { "zh": "所有 AI 模型，一个钱包", "en": "All your AI models, one wallet" },
+      "title": { "zh": "所有模型一个钱包，贵的单独设限", "en": "Every model, one wallet — expensive ones capped separately" },
       "body": {
-        "zh": "不用在每个后台分别设上限、分别看账单。tokenctl 把公司用的所有 AI 流量汇成一份预算——一个总数管住所有模型，谁超谁让。",
-        "en": "No need to set separate ceilings in every console or juggle separate bills. tokenctl rolls all your company's AI traffic into one budget — one number governs every model, and whoever goes over yields."
+        "zh": "不用在每个后台分别设上限、分别看账单。tokenctl 把公司用的所有 AI 流量汇成一份预算——一个总数管住所有模型。贵的模型（一次会话就是便宜模型的十倍花销）还能单独设一道上限，一次突击烧不掉整月的额度。",
+        "en": "No need to set separate ceilings in every console or juggle separate bills. tokenctl rolls all your company's AI traffic into one budget — one number governs every model. The expensive models (a single session can cost ten times the cheap ones) can take their own separate cap, so one runaway session can't quietly eat a whole month's headroom."
       },
-      "chips": ["› 一个总数", "› 多模型合一", "› 各走各的道"]
+      "chips": ["› 一个总数", "› 多模型合一", "› 贵的单独设限"]
     },
     {
-      "title": { "zh": "工程团队真能装上", "en": "A platform team can actually install it" },
+      "title": { "zh": "没花完的额度，滚到下月", "en": "Unspent budget rolls into next month" },
       "body": {
-        "zh": "不用搭数据库、消息队列，也不用起第二个进程。一份配置写好你的预算结构，把现有 agent 入口指过来就开始执行——平台团队一下午就能上线。",
-        "en": "No database, message queue, or second process to stand up. One config file describes your budget structure; point your existing agents at it and enforcement starts — a platform team can ship it in an afternoon."
+        "zh": "不用再让团队月底突击烧光预算凑满配额。每个节点都能滚存或留宽限：没花完的余量按你定的比例带进下个窗口当临时加成，先消耗再释放；也能给月初留一段宽限，不在切换的瞬间把流量掐断。",
+        "en": "Stop teams racing to burn through the budget at month-end just to fill the quota. Every node can roll over or grant a grace period: unspent balance rolls into the next window as a transient bump at a ratio you set, consumed first then released; or hold the old ceiling live for a grace period so traffic isn't cut off the instant the window flips."
       },
-      "chips": ["› 不用搭数据库", "› 配好即生效"]
+      "chips": ["› 余量滚存", "› 月初宽限"]
+    },
+    {
+      "title": { "zh": "一条命令，导出对账表", "en": "One command exports the reconciliation table" },
+      "body": {
+        "zh": "财务月底来问每个团队到底花了多少、按模型算多少钱？一条命令按月按团队按模型导出 CSV 或 JSON：用量配上一栏手算可验证的金额估算，直接拿去和供应商账单对账——不用再手动拼数字。",
+        "en": "When finance asks what each team actually spent last month, broken down by model in dollars, one command exports CSV or JSON by month, team, and model: usage paired with a hand-verifiable cost estimate column, ready to reconcile against the provider invoice — no more stitching numbers by hand."
+      },
+      "chips": ["› 按月按团队", "› CSV / JSON", "› 直接对账"]
     }
   ],
   "scene": { "kind": "hub-nodes", "nodes": ["Claude", "OpenAI", "Bedrock"] },
   "cta": {
     "headline": { "zh": "把公司的 AI 账单管起来", "en": "Take control of the company AI bill" },
     "sub": {
-      "zh": "Apache-2.0 开源；一份配置写好预算结构，把现有 agent 入口指过来就开始执行。",
-      "en": "Apache-2.0 licensed; one config file describes the budget, point your existing agents at it and enforcement begins."
+      "zh": "Apache-2.0 开源，不用搭数据库，也不起第二个进程。一份配置写好预算结构，把现有 agent 入口指过来就开始执行。",
+      "en": "Apache-2.0 licensed, no database to stand up and no second process to run. One config file describes the budget; point your existing agents at it and enforcement begins."
     },
     "button": { "zh": "在 GitHub 查看", "en": "View on GitHub" }
   },
