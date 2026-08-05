@@ -60,6 +60,13 @@ func (o *OpenAIProvider) APIKeyFromRequest(r *http.Request) string {
 	return ""
 }
 
+// ModelFromRequest peeks the JSON request body for the `model` field so the
+// budget tree can resolve a model_tiers sub-ceiling / cost_multiplier
+// (feat_model_tier_override). The body is restored for the reverse proxy.
+func (o *OpenAIProvider) ModelFromRequest(r *http.Request) string {
+	return peekJSONModelField(r)
+}
+
 // NewMeter builds a per-request Meter that tracks usage high-water marks
 // across the unnamed SSE data events Chat Completions emits and the typed
 // response.completed event the Responses API streams (whose usage is nested

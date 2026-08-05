@@ -46,8 +46,8 @@ func (w *wireAdmission) preempt() {
 // wireTree hands out a fixed wireAdmission so the test controls preemption.
 type wireTree struct{ adm *wireAdmission }
 
-func (t *wireTree) Admit(string, string) (Admission, error) { return t.adm, nil }
-func (t *wireTree) Snapshot() any                           { return struct{}{} }
+func (t *wireTree) Admit(string, string, string) (Admission, error) { return t.adm, nil }
+func (t *wireTree) Snapshot() any                                  { return struct{}{} }
 
 // wireProvider points the proxy at a test upstream and recognises everything.
 type wireProvider struct{ upstream *url.URL }
@@ -55,7 +55,8 @@ type wireProvider struct{ upstream *url.URL }
 func (p *wireProvider) Name() string                           { return "claude" }
 func (p *wireProvider) Upstream() *url.URL                     { return p.upstream }
 func (p *wireProvider) Matches(*http.Request) bool             { return true }
-func (p *wireProvider) APIKeyFromRequest(*http.Request) string { return "k" }
+func (p *wireProvider) APIKeyFromRequest(*http.Request) string  { return "k" }
+func (p *wireProvider) ModelFromRequest(*http.Request) string   { return "" }
 func (p *wireProvider) NewMeter() providers.Meter              { return &nopMeter{} }
 
 type nopMeter struct{}

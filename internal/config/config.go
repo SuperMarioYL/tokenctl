@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,15 +37,17 @@ const (
 
 // Config is the root of tokenctl.yaml.
 type Config struct {
-	Version   string           `yaml:"version"`
-	Listen    string           `yaml:"listen"`
-	TLS       TLSConfig        `yaml:"tls,omitempty"`
-	Store     StoreConfig      `yaml:"store"`
-	Metrics   MetricsConfig    `yaml:"metrics"`
-	Wallet    *WalletConfig    `yaml:"wallet,omitempty"`
-	Providers []ProviderConfig `yaml:"providers"`
-	Tree      *GroupConfig     `yaml:"tree"`
-	APIKeys   []APIKeyBinding  `yaml:"api_keys"`
+	Version     string           `yaml:"version"`
+	Listen      string           `yaml:"listen"`
+	TLS         TLSConfig        `yaml:"tls,omitempty"`
+	Store       StoreConfig      `yaml:"store"`
+	Metrics     MetricsConfig    `yaml:"metrics"`
+	Wallet      *WalletConfig    `yaml:"wallet,omitempty"`
+	Providers   []ProviderConfig `yaml:"providers"`
+	Tree        *GroupConfig     `yaml:"tree"`
+	APIKeys     []APIKeyBinding  `yaml:"api_keys"`
+	ModelTiers  []ModelTier      `yaml:"model_tiers,omitempty"`
+	Pricing     *PricingConfig   `yaml:"pricing,omitempty"`
 
 	// path is the file the config was loaded from; used for relative store paths.
 	path string `yaml:"-"`
@@ -89,10 +92,11 @@ type ProviderConfig struct {
 // child consumption). Leaves are nodes with len(Children) == 0 and are the
 // only nodes an inbound API key may be bound to.
 type GroupConfig struct {
-	Name     string         `yaml:"name"`
-	Weight   int            `yaml:"weight"`
-	Budget   *TokenBudget   `yaml:"budget,omitempty"`
-	Children []*GroupConfig `yaml:"children,omitempty"`
+	Name         string         `yaml:"name"`
+	Weight       int            `yaml:"weight"`
+	Budget       *TokenBudget   `yaml:"budget,omitempty"`
+	ResetPolicy  *ResetPolicy   `yaml:"reset_policy,omitempty"`
+	Children     []*GroupConfig `yaml:"children,omitempty"`
 }
 
 // TokenBudget is a per-window token ceiling with a soft-throttle threshold.
@@ -115,6 +119,71 @@ type TokenBudget struct {
 type APIKeyBinding struct {
 	Key   string `yaml:"key"`
 	Group string `yaml:"group"`
+}
+
+// ModelTier maps a model-name pattern (regex on the parsed request `model`
+// field, e.g. "claude-opus.*", "gpt-4.*") to either a cost_multiplier applied
+// to attributed tokens for that tier, or a nested budget_tokens_per_window
+// sub-ceiling enforced as a hard 429 when that tier alone crosses it, or both.
+//
+// This lets a team's budget tell Opus spend from Haiku spend: a single coding
+// agent session on claude-opus (~10x the per-token cost of haiku) can be
+// hard-capped independently of the team's flat token budget so it cannot
+// invisibly consume a whole window's headroom.
+type ModelTier struct {
+	Name                 string        `yaml:"name"`
+	Pattern              string        `yaml:"pattern"`
+	CostMultiplier       float64       `yaml:"cost_multiplier,omitempty"`
+	BudgetTokensPerWindow *TokenBudget `yaml:"budget_tokens_per_window,omitempty"`
+}
+
+// ResetPolicy is the per-node window rollover policy. It accepts either a bare
+// string ("hard") via a custom UnmarshalYAML or a map with explicit fields.
+//
+//   - hard (default, today's behaviour): the consumed counter is zeroed on
+//     rollover.
+//   - rollover (object {rollover_cap_pct: N}): carry min(unspent, N% of
+//     ceiling) into the next window as a transient headroom bump, consumed
+//     first and released after one window (not re-baselined into the next
+//     window's ceiling).
+//   - grace (object {grace_period: Xm}): keep the old window's ceiling live
+//     for X minutes past rollover before flipping.
+type ResetPolicy struct {
+	Mode           string  `yaml:"mode"`
+	RolloverCapPct  float64 `yaml:"rollover_cap_pct,omitempty"`
+	GracePeriod     string  `yaml:"grace_period,omitempty"`
+}
+
+// UnmarshalYAML accepts reset_policy as either a bare scalar (e.g.
+// `reset_policy: hard`) or a mapping (`reset_policy: {mode: rollover,
+// rollover_cap_pct: 50}`). A bare scalar populates Mode.
+func (p *ResetPolicy) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		var s string
+		if err := value.Decode(&s); err != nil {
+			return err
+		}
+		p.Mode = s
+		return nil
+	}
+	type raw ResetPolicy
+	return value.Decode((*raw)(p))
+}
+
+// PricingConfig is the per-model per-1M-tokens price table used by
+// `tokenctl export` to compute a cost_estimate column for invoice
+// reconciliation.
+type PricingConfig struct {
+	Models []ModelPrice `yaml:"models"`
+}
+
+// ModelPrice is one row of the pricing table. Pattern is a regex matched
+// against the request `model` field (first match wins). Prices are per one
+// million tokens.
+type ModelPrice struct {
+	Pattern           string  `yaml:"pattern"`
+	InputPerMillion   float64 `yaml:"input_per_million"`
+	OutputPerMillion  float64 `yaml:"output_per_million"`
 }
 
 // Path returns the file the config was loaded from, or empty if constructed
@@ -161,6 +230,15 @@ func (c *Config) applyDefaults() {
 		c.Store.Path = filepath.Join(filepath.Dir(c.path), c.Store.Path)
 	}
 	defaultGroupSoftThrottle(c.Tree)
+	defaultResetPolicy(c.Tree)
+	for i := range c.ModelTiers {
+		if c.ModelTiers[i].CostMultiplier == 0 {
+			c.ModelTiers[i].CostMultiplier = 1.0
+		}
+		if b := c.ModelTiers[i].BudgetTokensPerWindow; b != nil && b.SoftThrottleAt == 0 {
+			b.SoftThrottleAt = 0.8
+		}
+	}
 	if c.Wallet != nil && c.Wallet.Budget != nil && c.Wallet.Budget.SoftThrottleAt == 0 {
 		c.Wallet.Budget.SoftThrottleAt = 0.8
 	}
@@ -175,6 +253,22 @@ func defaultGroupSoftThrottle(g *GroupConfig) {
 	}
 	for _, child := range g.Children {
 		defaultGroupSoftThrottle(child)
+	}
+}
+
+// defaultResetPolicy fills in Mode="hard" (today's behaviour) for any node that
+// omits reset_policy. Rollover/grace nodes keep their explicit Mode.
+func defaultResetPolicy(g *GroupConfig) {
+	if g == nil {
+		return
+	}
+	if g.ResetPolicy == nil {
+		g.ResetPolicy = &ResetPolicy{Mode: "hard"}
+	} else if g.ResetPolicy.Mode == "" {
+		g.ResetPolicy.Mode = "hard"
+	}
+	for _, child := range g.Children {
+		defaultResetPolicy(child)
 	}
 }
 
@@ -216,6 +310,66 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("api_keys[%d]: group %q does not resolve to a leaf in tree", i, b.Group)
 		}
 	}
+	if err := validateModelTiers(c.ModelTiers); err != nil {
+		return err
+	}
+	if c.Pricing != nil {
+		if err := validatePricing(c.Pricing); err != nil {
+			return fmt.Errorf("pricing: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateModelTiers checks model_tiers entries have unique names, compilable
+// regex patterns, positive cost multipliers, and valid sub-ceilings.
+func validateModelTiers(tiers []ModelTier) error {
+	seen := map[string]bool{}
+	for i, mt := range tiers {
+		if mt.Name == "" {
+			return fmt.Errorf("model_tiers[%d]: name is empty", i)
+		}
+		if seen[mt.Name] {
+			return fmt.Errorf("model_tiers[%d]: duplicate tier name %q", i, mt.Name)
+		}
+		seen[mt.Name] = true
+		if mt.Pattern == "" {
+			return fmt.Errorf("model_tiers[%d]: pattern is empty", i)
+		}
+		if _, err := regexp.Compile(mt.Pattern); err != nil {
+			return fmt.Errorf("model_tiers[%d]: pattern %q: %w", i, mt.Pattern, err)
+		}
+		if mt.CostMultiplier < 0 {
+			return fmt.Errorf("model_tiers[%d]: cost_multiplier must be >= 0", i)
+		}
+		if mt.BudgetTokensPerWindow != nil {
+			if err := validateBudget(mt.BudgetTokensPerWindow); err != nil {
+				return fmt.Errorf("model_tiers[%d].budget_tokens_per_window: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validatePricing checks the pricing.models rows have compilable regex
+// patterns and non-negative prices.
+func validatePricing(p *PricingConfig) error {
+	seen := map[string]bool{}
+	for i, mp := range p.Models {
+		if mp.Pattern == "" {
+			return fmt.Errorf("models[%d]: pattern is empty", i)
+		}
+		if seen[mp.Pattern] {
+			return fmt.Errorf("models[%d]: duplicate pattern %q", i, mp.Pattern)
+		}
+		seen[mp.Pattern] = true
+		if _, err := regexp.Compile(mp.Pattern); err != nil {
+			return fmt.Errorf("models[%d]: pattern %q: %w", i, mp.Pattern, err)
+		}
+		if mp.InputPerMillion < 0 || mp.OutputPerMillion < 0 {
+			return fmt.Errorf("models[%d]: prices must be >= 0", i)
+		}
+	}
 	return nil
 }
 
@@ -254,6 +408,11 @@ func validateGroup(g *GroupConfig, parentPath string, leaves map[string]bool) er
 	if g.Budget != nil {
 		if err := validateBudget(g.Budget); err != nil {
 			return fmt.Errorf("group %s.budget: %w", path, err)
+		}
+	}
+	if g.ResetPolicy != nil {
+		if err := validateResetPolicy(g.ResetPolicy); err != nil {
+			return fmt.Errorf("group %s.reset_policy: %w", path, err)
 		}
 	}
 	if len(g.Children) == 0 {
@@ -307,6 +466,33 @@ func validateBudget(b *TokenBudget) error {
 	}
 	if b.SoftThrottleAt <= 0 || b.SoftThrottleAt > 1 {
 		return fmt.Errorf("soft_throttle_at %v: must be in (0, 1]", b.SoftThrottleAt)
+	}
+	return nil
+}
+
+// validateResetPolicy checks Mode is one of hard|rollover|grace and that the
+// mode-specific fields are present and valid.
+func validateResetPolicy(p *ResetPolicy) error {
+	switch p.Mode {
+	case "hard":
+		// no extra fields required
+	case "rollover":
+		if p.RolloverCapPct <= 0 || p.RolloverCapPct > 100 {
+			return fmt.Errorf("rollover_cap_pct %v: must be in (0, 100]", p.RolloverCapPct)
+		}
+	case "grace":
+		if p.GracePeriod == "" {
+			return errors.New("grace_period: required for grace mode")
+		}
+		d, err := time.ParseDuration(p.GracePeriod)
+		if err != nil {
+			return fmt.Errorf("grace_period %q: %w", p.GracePeriod, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("grace_period %q: must be > 0", p.GracePeriod)
+		}
+	default:
+		return fmt.Errorf("mode %q: must be one of hard|rollover|grace", p.Mode)
 	}
 	return nil
 }

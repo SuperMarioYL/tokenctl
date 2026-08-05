@@ -35,7 +35,7 @@ import (
 //
 //	go build -ldflags "-X main.Version=v0.1.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "0.6.0-dev"
+	Version = "v0.9.0"
 	Commit  = "unknown"
 )
 
@@ -75,6 +75,7 @@ func newRootCmd() *cobra.Command {
 		newUpCmd(),
 		newServeCmd(),
 		newTopCmd(),
+		newExportCmd(),
 		newVersionCmd(),
 	)
 	return root

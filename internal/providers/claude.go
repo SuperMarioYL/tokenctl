@@ -10,8 +10,10 @@
 package providers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,13 +28,18 @@ import (
 // it (path prefix, header sniff, etc). APIKeyFromRequest extracts the
 // credential the operator uses to identify the request — this string is the
 // key in config.APIKeyBinding that pins the request to a tree leaf.
-// NewMeter returns a per-request stateful Meter that the proxy feeds either
-// SSE events (event name + JSON data) or one complete JSON body.
+// ModelFromRequest extracts the request `model` field (e.g. "claude-opus-4-",
+// "gpt-4o") so the budget tree can resolve a model_tiers sub-ceiling /
+// cost_multiplier (feat_model_tier_override); it MUST restore r.Body so the
+// reverse proxy can still stream it upstream, and return "" when no model is
+// recoverable. NewMeter returns a per-request stateful Meter that the proxy
+// feeds either SSE events (event name + JSON data) or one complete JSON body.
 type Provider interface {
 	Name() string
 	Upstream() *url.URL
 	Matches(r *http.Request) bool
 	APIKeyFromRequest(r *http.Request) string
+	ModelFromRequest(r *http.Request) string
 	NewMeter() Meter
 }
 
@@ -144,6 +151,72 @@ func (c *ClaudeProvider) APIKeyFromRequest(r *http.Request) string {
 	}
 	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+	}
+	return ""
+}
+
+// ModelFromRequest peeks the JSON request body for the `model` field so the
+// budget tree can resolve a model_tiers sub-ceiling / cost_multiplier
+// (feat_model_tier_override). The body is restored via a combined reader so
+// the reverse proxy can still stream it upstream unchanged.
+func (c *ClaudeProvider) ModelFromRequest(r *http.Request) string {
+	return peekJSONModelField(r)
+}
+
+// peekJSONModelField reads up to peekLimit bytes from the request body, scans
+// for the first `"model"` JSON string value, and restores r.Body so the caller
+// (the reverse proxy) still sees the full stream. Returns "" when the field is
+// absent or the body is not a JSON object small enough to contain it up front.
+// This is fail-soft: a model we cannot recover simply gets no tier applied.
+const peekLimit = 64 * 1024
+
+func peekJSONModelField(r *http.Request) string {
+	if r == nil || r.Body == nil {
+		return ""
+	}
+	buf := make([]byte, peekLimit)
+	n, _ := io.ReadFull(r.Body, buf)
+	have := buf[:n]
+	// Restore the body so the reverse proxy streams the full content upstream.
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(have), r.Body))
+	if n == 0 {
+		return ""
+	}
+	return scanJSONStringField(have, "model")
+}
+
+// scanJSONStringField finds the first `"key": "value"` (or `"key":"value"`) in
+// data and returns the unquoted value. It is a deliberately small, allocation-
+// free scanner: it does not parse the whole document, so a `model` key
+// appearing inside a nested object or string literal could in principle be a
+// false positive — but every supported provider places `model` at the top
+// level of the request body, so the cheap scan suffices and stays off the hot
+// path's allocation budget.
+func scanJSONStringField(data []byte, key string) string {
+	needle := []byte(`"` + key + `"`)
+	idx := bytes.Index(data, needle)
+	if idx < 0 {
+		return ""
+	}
+	i := idx + len(needle)
+	// Skip whitespace and the ':'.
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r' || data[i] == ':') {
+		i++
+	}
+	if i >= len(data) || data[i] != '"' {
+		return ""
+	}
+	i++ // opening quote
+	start := i
+	for i < len(data) {
+		switch data[i] {
+		case '\\':
+			i += 2
+			continue
+		case '"':
+			return string(data[start:i])
+		}
+		i++
 	}
 	return ""
 }

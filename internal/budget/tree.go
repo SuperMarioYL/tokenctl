@@ -24,6 +24,8 @@ package budget
 import (
 	"context"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +46,7 @@ var (
 	ErrUnknownKey = proxy.ErrUnknownKey
 	ErrThrottled  = proxy.ErrThrottled
 	ErrDenied     = proxy.ErrDenied
+	ErrTierDenied = proxy.ErrTierDenied
 )
 
 // defaultReserveEstimate is the conservative per-request in-flight token
@@ -76,6 +79,7 @@ type AuditEvent struct {
 	Kind      string    `json:"kind"` // admit | deny | throttle | preempt | release
 	Group     string    `json:"group"`
 	Provider  string    `json:"provider,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	InTokens  int64     `json:"in_tokens,omitempty"`
 	OutTokens int64     `json:"out_tokens,omitempty"`
@@ -116,6 +120,12 @@ type Tree struct {
 	walletReserved    int64
 	walletWindowStart time.Time
 	providerConsumed  map[string]int64
+	// tierConsumed holds the per-model-tier windowed consumed counter + reserved
+	// in-flight estimate, keyed by tier name. Populated by SetModelTiers.
+	// Each tier with a budget_tokens_per_window sub-ceiling is hard-enforced
+	// independently of the node's flat token budget (feat_model_tier_override).
+	tiers        []*tierState
+	tierByName   map[string]*tierState
 	inFlightCount     int64
 	deniesTotal       atomic.Int64
 	throttlesTotal    atomic.Int64
@@ -146,6 +156,15 @@ type node struct {
 	parent   *node
 	children []*node
 
+	// resetPolicy + carry implement feat_budget_reset_policy. resetPolicy is
+	// the per-node rollover policy (hard | rollover | grace). carry is the
+	// transient headroom bump carried into the current window from the prior
+	// window's unspent budget (one-window only, not re-baselined); it offsets
+	// effectiveLoad so the carry is consumed before the window's ceiling.
+	resetPolicy *config.ResetPolicy
+	graceD      time.Duration
+	carry       int64
+
 	mu          sync.Mutex
 	consumed    int64
 	reserved    int64 // sum of in-flight per-request estimates not yet credited
@@ -168,6 +187,8 @@ type Admission struct {
 	leaf     *node
 	provider string
 	chain    []*node // leaf .. root (deepest first)
+	model    string
+	tier     *tierState
 
 	startedAt time.Time
 
@@ -180,6 +201,11 @@ type Admission struct {
 	// Release().
 	reservation  int64
 	reservedLeft atomic.Int64
+	// tierReservedLeft mirrors reservedLeft for the per-tier in-flight estimate
+	// so a concurrent Opus swarm cannot overshoot the tier ceiling before its
+	// tokens are credited (feat_model_tier_override). Only placed when the
+	// admission's tier has a sub-ceiling.
+	tierReservedLeft atomic.Int64
 
 	mu  sync.Mutex
 	in  int64
@@ -190,6 +216,56 @@ type Admission struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// Model returns the parsed request model attributed to this admission, if any.
+func (a *Admission) Model() string { return a.model }
+
+// tierState is the runtime per-model-tier counter. A tier with budget>0 is
+// hard-enforced independently of any node's flat token budget
+// (feat_model_tier_override); costMult scales the attributed token count so an
+// Opus-class session (~10x Haiku per token) consumes budget proportionate to
+// its cost. Each tier carries its own window + reserved-in-flight estimate so
+// a concurrent Opus swarm cannot collectively overshoot the tier ceiling.
+type tierState struct {
+	name     string
+	re       *regexp.Regexp
+	costMult float64
+	budget   int64 // 0 = no per-tier sub-ceiling
+	windowD  time.Duration
+
+	mu          sync.Mutex
+	consumed    int64
+	reserved    int64
+	windowStart time.Time
+	denies      int64
+}
+
+// maybeRolloverLocked resets the tier window against now if elapsed. The caller
+// MUST hold ts.mu. Reservations are NOT zeroed on rollover (an in-flight
+// request straddling a boundary still holds real headroom).
+func (ts *tierState) maybeRolloverLocked(now time.Time) {
+	if ts.windowD > 0 && now.Sub(ts.windowStart) >= ts.windowD {
+		ts.consumed = 0
+		ts.windowStart = now
+	}
+}
+
+func (ts *tierState) effectiveLoad(now time.Time) (int64, time.Time) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.maybeRolloverLocked(now)
+	load := ts.consumed + ts.reserved
+	if load < 0 {
+		load = 0
+	}
+	return load, ts.windowStart
+}
+
+func (ts *tierState) bumpDenies() {
+	ts.mu.Lock()
+	ts.denies++
+	ts.mu.Unlock()
 }
 
 // NewTree builds the runtime tree from a GroupConfig and attaches optional
@@ -214,6 +290,7 @@ func NewTree(root *config.GroupConfig, state any) (*Tree, error) {
 		leafByPath:       map[string]*node{},
 		leafByKey:        map[string]*node{},
 		providerConsumed: map[string]int64{},
+		tierByName:       map[string]*tierState{},
 		reserveEstimate:  defaultReserveEstimate,
 	}
 	if s, ok := state.(State); ok {
@@ -302,6 +379,90 @@ func (t *Tree) SetReserveEstimate(n int64) {
 	t.reserveEstimate = n
 }
 
+// SetModelTiers compiles the config's model_tiers block into the runtime tier
+// resolvers + per-tier windowed counters. Each tier maps a regex on the parsed
+// request `model` field to a cost_multiplier (scales attributed tokens so
+// Opus-class spend counts ~10x Haiku) and/or a budget_tokens_per_window
+// sub-ceiling enforced as a hard 429 independently of the node's flat budget.
+// Call before Admit fires. Safe to call once; calling again replaces the set.
+func (t *Tree) SetModelTiers(tiers []config.ModelTier) error {
+	out := make([]*tierState, 0, len(tiers))
+	byName := map[string]*tierState{}
+	now := time.Now()
+	for _, mt := range tiers {
+		re, err := regexp.Compile(mt.Pattern)
+		if err != nil {
+			return fmt.Errorf("budget: tier %q pattern %q: %w", mt.Name, mt.Pattern, err)
+		}
+		mult := mt.CostMultiplier
+		if mult <= 0 {
+			mult = 1.0
+		}
+		ts := &tierState{
+			name:     mt.Name,
+			re:       re,
+			costMult: mult,
+			windowStart: now,
+		}
+		if mt.BudgetTokensPerWindow != nil {
+			d, err := time.ParseDuration(mt.BudgetTokensPerWindow.Window)
+			if err != nil {
+				return fmt.Errorf("budget: tier %q window: %w", mt.Name, err)
+			}
+			ts.budget = mt.BudgetTokensPerWindow.Tokens
+			ts.windowD = d
+		}
+		out = append(out, ts)
+		byName[mt.Name] = ts
+	}
+	t.tiers = out
+	t.tierByName = byName
+	return nil
+}
+
+// resolveTier returns the first tier whose pattern matches model, or nil.
+func (t *Tree) resolveTier(model string) *tierState {
+	if model == "" || len(t.tiers) == 0 {
+		return nil
+	}
+	for _, ts := range t.tiers {
+		if ts.re.MatchString(model) {
+			return ts
+		}
+	}
+	return nil
+}
+
+// TierStat is a read-only view of one model-tier's windowed counter, used by
+// `tokenctl top` / Snapshot and the export reconciler so cost-multiplied
+// attribution is observable independently of the node's flat budget.
+type TierStat struct {
+	Name           string `json:"name"`
+	BudgetTokens   int64  `json:"budget_tokens,omitempty"`
+	ConsumedTokens int64  `json:"consumed_tokens"`
+	InFlight       int64  `json:"in_flight"`
+}
+
+// TierStats returns a stable, JSON-ready view of every configured tier's
+// current-window consumed + reserved (the cost-multiplied attribution).
+func (t *Tree) TierStats() []TierStat {
+	now := time.Now()
+	out := make([]TierStat, 0, len(t.tiers))
+	for _, ts := range t.tiers {
+		ts.mu.Lock()
+		ts.maybeRolloverLocked(now)
+		c := ts.consumed
+		r := ts.reserved
+		ts.mu.Unlock()
+		stat := TierStat{Name: ts.name, ConsumedTokens: c, InFlight: r}
+		if ts.budget > 0 {
+			stat.BudgetTokens = ts.budget
+		}
+		out = append(out, stat)
+	}
+	return out
+}
+
 // buildNode recursively materialises a GroupConfig into a node + collects the
 // dotted path.
 func (t *Tree) buildNode(g *config.GroupConfig, parent *node, parentPath string) (*node, error) {
@@ -315,6 +476,7 @@ func (t *Tree) buildNode(g *config.GroupConfig, parent *node, parentPath string)
 		weight:      g.Weight,
 		budget:      g.Budget,
 		parent:      parent,
+		resetPolicy: g.ResetPolicy,
 		inFlight:    map[*Admission]struct{}{},
 		windowStart: time.Now(),
 	}
@@ -324,6 +486,15 @@ func (t *Tree) buildNode(g *config.GroupConfig, parent *node, parentPath string)
 			return nil, fmt.Errorf("budget: parse window for %s: %w", path, err)
 		}
 		n.windowD = d
+	}
+	// Parse the grace-period duration once at build time so the hot rollover
+	// path stays allocation-free (feat_budget_reset_policy).
+	if n.resetPolicy != nil && n.resetPolicy.Mode == "grace" && n.resetPolicy.GracePeriod != "" {
+		d, err := time.ParseDuration(n.resetPolicy.GracePeriod)
+		if err != nil {
+			return nil, fmt.Errorf("budget: parse grace_period for %s: %w", path, err)
+		}
+		n.graceD = d
 	}
 	if t.state != nil {
 		c, ws, err := t.state.LoadCounter(path)
@@ -393,27 +564,62 @@ func (t *Tree) flushAll() {
 // Admit pins an inbound API key to its leaf, walks the leaf->root chain
 // (plus optional wallet) and enforces budget thresholds. The returned ticket
 // must have Release() called exactly once.
-func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
+//
+// model is the parsed request `model` field (e.g. "claude-opus-4-..."). When
+// the config declares a model_tiers block, Admit resolves the request's tier
+// and (a) applies the tier's cost_multiplier to attributed tokens so an
+// Opus-class session consumes budget proportionate to its cost, and (b)
+// hard-denies at X-TokenCtl-Reason: budget_exceeded_tier when the tier's own
+// sub-ceiling is crossed — independently of the leaf's parent budget
+// (feat_model_tier_override). Pass "" when no model is available; no tier
+// applies and behaviour is identical to the pre-v0.9.0 flat-budget path.
+func (t *Tree) Admit(apiKey, provider, model string) (proxy.Admission, error) {
 	leaf, ok := t.leafByKey[apiKey]
 	if !ok {
-		t.appendAudit(AuditEvent{At: time.Now(), Kind: "deny", Reason: "unknown_key", Provider: provider})
+		t.appendAudit(AuditEvent{At: time.Now(), Kind: "deny", Reason: "unknown_key", Provider: provider, Model: model})
 		return nil, ErrUnknownKey
 	}
 
 	chain := chainToRoot(leaf)
 	now := time.Now()
 	reserve := t.reserveEstimate
+	tier := t.resolveTier(model)
+
+	// The reservation is held in attributed-token units so a tier with a
+	// cost_multiplier reserves a proportionate share against the node + wallet
+	// + tier ceilings (an Opus request with mult=10 reserves 10x the raw
+	// estimate, matching the 10x credits it will attract).
+	attribReserve := reserve
+	if tier != nil && tier.costMult != 1.0 {
+		attribReserve = int64(math.Round(float64(reserve) * tier.costMult))
+	}
+
+	// Tier sub-ceiling hard-deny. Enforced BEFORE the node chain so an Opus
+	// swarm on a leaf whose parent budget has room is hard-denied at the tier
+	// ceiling while sibling Haiku traffic on the same leaf keeps flowing
+	// (feat_model_tier_override done-when).
+	if tier != nil && tier.budget > 0 {
+		tl, _ := tier.effectiveLoad(now)
+		if tl+attribReserve >= tier.budget {
+			tier.bumpDenies()
+			t.deniesTotal.Add(1)
+			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "budget_exceeded_tier", Group: leaf.path, Provider: provider, Model: model})
+			return nil, ErrTierDenied
+		}
+	}
 
 	// Hard-deny + soft-throttle pre-checks on every ancestor. Hard wins over
 	// soft (deny is final), so we run all hard checks first.
 	//
-	// The comparison uses effectiveLoad (consumed + reserved) plus this
+	// The comparison uses effectiveLoad (consumed + reserved - carry) plus this
 	// request's own reserve estimate, so N concurrent agents that all admit at
 	// consumed≈0 cannot collectively blow past the hard ceiling before their
 	// tokens are credited asynchronously
 	// (fix-admit-check-then-act-overshoot). All checks read against one now so
 	// a window boundary can't make different ancestors disagree
-	// (fix-uncoordinated-window-reset-breaks-rollup).
+	// (fix-uncoordinated-window-reset-breaks-rollup). The carry offset
+	// (feat_budget_reset_policy) lets a node spend its rolled-over headroom
+	// before the ceiling bites.
 	for _, n := range chain {
 		if n.budget == nil {
 			continue
@@ -422,7 +628,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		if load >= n.budget.Tokens {
 			n.bumpDenies()
 			t.deniesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "budget_exceeded", Group: n.path, Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "budget_exceeded", Group: n.path, Provider: provider, Model: model})
 			return nil, ErrDenied
 		}
 	}
@@ -430,7 +636,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		wl, _ := t.walletEffectiveLoad(now)
 		if wl >= t.walletBudget.Tokens {
 			t.deniesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "wallet_exceeded", Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "wallet_exceeded", Provider: provider, Model: model})
 			return nil, ErrDenied
 		}
 	}
@@ -443,7 +649,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		if frac(load, n.budget.Tokens) >= n.budget.SoftThrottleAt {
 			n.bumpThrottles()
 			t.throttlesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "soft_throttle", Group: n.path, Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "soft_throttle", Group: n.path, Provider: provider, Model: model})
 			return nil, ErrThrottled
 		}
 	}
@@ -451,7 +657,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		wl, _ := t.walletEffectiveLoad(now)
 		if frac(wl, t.walletBudget.Tokens) >= t.walletBudget.SoftThrottleAt {
 			t.throttlesTotal.Add(1)
-			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "wallet_soft", Provider: provider})
+			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "wallet_soft", Provider: provider, Model: model})
 			return nil, ErrThrottled
 		}
 	}
@@ -462,6 +668,8 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		leaf:      leaf,
 		provider:  provider,
 		chain:     chain,
+		model:     model,
+		tier:      tier,
 		startedAt: now,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -469,12 +677,12 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 	// Place the reservation on every node in the chain so it is visible to
 	// concurrent admissions immediately. Drawn down by attribute() as real
 	// tokens arrive; any remainder released in Release().
-	if reserve > 0 {
-		a.reservation = reserve
-		a.reservedLeft.Store(reserve)
+	if attribReserve > 0 {
+		a.reservation = attribReserve
+		a.reservedLeft.Store(attribReserve)
 		for _, anc := range chain {
 			anc.mu.Lock()
-			anc.reserved += reserve
+			anc.reserved += attribReserve
 			anc.mu.Unlock()
 		}
 		// Mirror the per-node reservation at the wallet layer so the wallet
@@ -484,8 +692,17 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 		// (fix-wallet-admit-gate-has-no-in-flight-reservation).
 		if t.walletBudget != nil {
 			t.mu.Lock()
-			t.walletReserved += reserve
+			t.walletReserved += attribReserve
 			t.mu.Unlock()
+		}
+		// Place the matching reservation on the resolved tier so a concurrent
+		// Opus swarm cannot collectively overshoot the tier ceiling before its
+		// tokens are credited (feat_model_tier_override).
+		if tier != nil && tier.budget > 0 {
+			a.tierReservedLeft.Store(attribReserve)
+			tier.mu.Lock()
+			tier.reserved += attribReserve
+			tier.mu.Unlock()
 		}
 	}
 	leaf.mu.Lock()
@@ -494,7 +711,7 @@ func (t *Tree) Admit(apiKey, provider string) (proxy.Admission, error) {
 	t.mu.Lock()
 	t.inFlightCount++
 	t.mu.Unlock()
-	t.appendAudit(AuditEvent{At: now, Kind: "admit", Group: leaf.path, Provider: provider})
+	t.appendAudit(AuditEvent{At: now, Kind: "admit", Group: leaf.path, Provider: provider, Model: model})
 	return a, nil
 }
 
@@ -555,6 +772,7 @@ func (a *Admission) Release() {
 		Kind:      "release",
 		Group:     a.leaf.path,
 		Provider:  a.provider,
+		Model:     a.model,
 		InTokens:  a.in,
 		OutTokens: a.out,
 	})
@@ -611,6 +829,20 @@ func (a *Admission) releaseReservation() {
 		}
 	}
 	t.mu.Unlock()
+	// Drain the matching reservation from the resolved tier so a released
+	// request doesn't leave phantom in-flight load pinned against the tier
+	// ceiling (feat_model_tier_override).
+	if a.tier != nil && a.tier.budget > 0 {
+		tleft := a.tierReservedLeft.Swap(0)
+		if tleft > 0 {
+			a.tier.mu.Lock()
+			a.tier.reserved -= tleft
+			if a.tier.reserved < 0 {
+				a.tier.reserved = 0
+			}
+			a.tier.mu.Unlock()
+		}
+	}
 }
 
 // Context returns a context that is cancelled when the request is preempted
@@ -624,19 +856,36 @@ func (a *Admission) Preempted() bool { return a.preempted.Load() }
 // attribute walks the chain and credits n tokens to each ancestor, the
 // wallet, and the per-provider counter. It also persists best-effort.
 //
-// A single now is captured up front so every node + the wallet that rolls
-// over on this delta does so against the *same* instant
+// A single now is captured up front so every node + the wallet + the tier
+// that rolls over on this delta does so against the *same* instant
 // (fix-uncoordinated-window-reset-breaks-rollup) — a parent and child can no
 // longer drift their windowStart across a boundary and break the
 // sum(child.consumed) <= parent.consumed invariant.
 //
 // As real tokens are credited they draw down the per-request reservation held
 // at admission (fix-admit-check-then-act-overshoot) so a node's effective
-// load (consumed + reserved) is conserved across the credit, never
+// load (consumed + reserved - carry) is conserved across the credit, never
 // double-counting and never momentarily dipping below the true in-flight
 // estimate.
-func (t *Tree) attribute(a *Admission, n int64) {
+//
+// When the admission carries a model tier (feat_model_tier_override) the raw
+// delta is scaled by the tier's cost_multiplier so Opus-class spend counts
+// proportionate to its per-token cost, and the scaled delta is credited to the
+// tier's own windowed counter (drawn down against the tier reservation the
+// same way node reservations are).
+func (t *Tree) attribute(a *Admission, rawN int64) {
 	now := time.Now()
+	// Apply the tier cost multiplier to the attributed delta so an Opus token
+	// (~10x Haiku) consumes ~10x the budget headroom. The reservation system
+	// holds reserves in the same attributed-token units, so the draw + credit
+	// stay conserved.
+	n := rawN
+	if a.tier != nil && a.tier.costMult != 1.0 {
+		scaled := int64(math.Round(float64(rawN) * a.tier.costMult))
+		if scaled > 0 {
+			n = scaled
+		}
+	}
 	// Draw down the reservation by the amount we're about to credit, bounded
 	// by what's still held. The drawn amount is removed from each node's
 	// reserved counter so reserved + consumed stays monotone w.r.t. real spend.
@@ -691,10 +940,48 @@ func (t *Tree) attribute(a *Admission, n int64) {
 		if t.state != nil {
 			_ = t.state.SaveCounter("__wallet__", wc, wws)
 		}
-		return
+	} else {
+		t.providerConsumed[a.provider] += n
+		t.mu.Unlock()
 	}
-	t.providerConsumed[a.provider] += n
-	t.mu.Unlock()
+	// Credit the resolved tier's windowed counter and draw down its in-flight
+	// reservation (feat_model_tier_override). The tier counter is independent
+	// of the node chain so an Opus swarm is hard-capped at the tier ceiling
+	// even when the parent budget has room.
+	if a.tier != nil {
+		ts := a.tier
+		ts.mu.Lock()
+		ts.maybeRolloverLocked(now)
+		ts.consumed += n
+		if tdraw := a.drawTierReservation(n); tdraw > 0 {
+			ts.reserved -= tdraw
+			if ts.reserved < 0 {
+				ts.reserved = 0
+			}
+		}
+		ts.mu.Unlock()
+	}
+}
+
+// drawTierReservation removes up to n from the still-held tier reservation and
+// returns the amount actually drawn. Used by attribute() to keep the tier
+// consumed + reserved conserved as real tokens replace the estimate
+// (feat_model_tier_override). No-op when the admission's tier had no
+// sub-ceiling (tierReservedLeft stays 0).
+func (a *Admission) drawTierReservation(n int64) int64 {
+	for {
+		cur := a.tierReservedLeft.Load()
+		if cur <= 0 {
+			return 0
+		}
+		draw := n
+		if draw > cur {
+			draw = cur
+		}
+		if a.tierReservedLeft.CompareAndSwap(cur, cur-draw) {
+			return draw
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +1016,7 @@ func (t *Tree) Snapshot() any {
 			Name           string `json:"name"`
 			ConsumedTokens int64  `json:"consumed_tokens"`
 		} `json:"providers,omitempty"`
+		Tiers []TierStat `json:"tiers,omitempty"`
 	}{GeneratedAt: time.Now()}
 
 	for _, n := range t.flat {
@@ -791,6 +1079,9 @@ func (t *Tree) Snapshot() any {
 	out.Denies = t.deniesTotal.Load()
 	out.Throttles = t.throttlesTotal.Load()
 	out.Preempts = t.preemptsTotal.Load()
+	if stats := t.TierStats(); len(stats) > 0 {
+		out.Tiers = stats
+	}
 	return out
 }
 
@@ -883,16 +1174,18 @@ func (n *node) snapshotConsumed() (int64, time.Time) {
 	return n.consumed, n.windowStart
 }
 
-// effectiveLoad returns consumed + reserved (the in-flight estimate held by
-// live admissions) for a node, applying a lazy window reset against now. This
-// is the value the admission gate compares against budgets so a concurrent
-// swarm that has admitted but not yet been credited still counts toward the
-// ceiling (fix-admit-check-then-act-overshoot).
+// effectiveLoad returns consumed + reserved - carry (the in-flight estimate held
+// by live admissions minus the rolled-over headroom bump) for a node, applying
+// a lazy window reset against now. This is the value the admission gate
+// compares against budgets so a concurrent swarm that has admitted but not yet
+// been credited still counts toward the ceiling (fix-admit-check-then-act-
+// overshoot). The carry offset (feat_budget_reset_policy) lets a node spend its
+// rolled-over headroom before the window's ceiling bites.
 func (n *node) effectiveLoad(now time.Time) (int64, time.Time) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.maybeRolloverLocked(now)
-	load := n.consumed + n.reserved
+	load := n.consumed + n.reserved - n.carry
 	if load < 0 {
 		load = 0
 	}
@@ -901,16 +1194,53 @@ func (n *node) effectiveLoad(now time.Time) (int64, time.Time) {
 
 // maybeRolloverLocked resets the node's window against the supplied now if the
 // window has elapsed. The caller MUST hold n.mu. Passing a single now down a
-// whole chain (see attribute / Tree.rolloverAll) is what keeps parent and
-// child windowStart coherent across a boundary
-// (fix-uncoordinated-window-reset-breaks-rollup). Reservations are NOT zeroed
-// on rollover — an in-flight request that straddles a window boundary still
-// holds real headroom in the new window.
+// whole chain (see attribute / Tree.rolloverAll) is what keeps parent and child
+// windowStart coherent across a boundary (fix-uncoordinated-window-reset-
+// breaks-rollup). Reservations are NOT zeroed on rollover — an in-flight
+// request that straddles a window boundary still holds real headroom in the new
+// window.
+//
+// feat_budget_reset_policy: the rollover policy is per-node.
+//   - hard (default, today's behaviour): consumed is zeroed.
+//   - rollover {rollover_cap_pct: N}: min(unspent_ceiling, N% of ceiling) is
+//     carried into the next window as a transient headroom bump (n.carry),
+//     consumed first and released after one window (not re-baselined into the
+//     next window's ceiling). The carry is recomputed from THIS window's true
+//     ceiling usage (consumed minus the prior carry) so an unused carry does
+//     not leak forward.
+//   - grace {grace_period: Xm}: the old window's ceiling stays live for Xm
+//     past rollover before the reset fires.
 func (n *node) maybeRolloverLocked(now time.Time) {
-	if n.windowD > 0 && now.Sub(n.windowStart) >= n.windowD {
-		n.consumed = 0
-		n.windowStart = now
+	if n.windowD <= 0 || now.Sub(n.windowStart) < n.windowD {
+		return
 	}
+	// grace: keep the old window's ceiling live for graceD past the nominal
+	// rollover instant before flipping (feat_budget_reset_policy).
+	if n.resetPolicy != nil && n.resetPolicy.Mode == "grace" && n.graceD > 0 {
+		if now.Sub(n.windowStart) < n.windowD+n.graceD {
+			return
+		}
+	}
+	// Compute the carry into the NEXT window from THIS window's unspent
+	// ceiling (rollover policy). trueUsed excludes the prior carry so an
+	// unused carry does not leak forward as ceiling unspent.
+	var newCarry int64
+	if n.budget != nil && n.resetPolicy != nil && n.resetPolicy.Mode == "rollover" && n.resetPolicy.RolloverCapPct > 0 {
+		trueUsed := n.consumed - n.carry
+		if trueUsed < 0 {
+			trueUsed = 0
+		}
+		if unspent := n.budget.Tokens - trueUsed; unspent > 0 {
+			cap := int64(math.Round(float64(n.budget.Tokens) * n.resetPolicy.RolloverCapPct / 100))
+			if unspent < cap {
+				cap = unspent
+			}
+			newCarry = cap
+		}
+	}
+	n.carry = newCarry
+	n.consumed = 0
+	n.windowStart = now
 }
 
 func (n *node) bumpDenies() {

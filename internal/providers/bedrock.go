@@ -96,6 +96,33 @@ func (b *BedrockProvider) APIKeyFromRequest(r *http.Request) string {
 	return ""
 }
 
+// ModelFromRequest extracts the modelId from the Bedrock Runtime URL path
+// (/model/{modelId}/invoke ...) so the budget tree can resolve a model_tiers
+// sub-ceiling / cost_multiplier (feat_model_tier_override). Bedrock carries the
+// model in the path, not the body, so there is no body peeking.
+func (b *BedrockProvider) ModelFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	p := r.URL.Path
+	if !strings.HasPrefix(p, "/model/") {
+		return ""
+	}
+	rest := strings.TrimPrefix(p, "/model/")
+	// The modelId is everything up to the next "/invoke" or "/converse" suffix.
+	// Cross-region inference profiles embed "/", so do not split on "/".
+	for _, suffix := range []string{"/invoke", "/invoke-with-response-stream", "/converse", "/converse-stream"} {
+		if idx := strings.Index(rest, suffix); idx >= 0 {
+			rest = rest[:idx]
+		}
+	}
+	// URL-escape decoding (model ids may contain encoded chars).
+	if m, err := url.PathUnescape(rest); err == nil {
+		rest = m
+	}
+	return rest
+}
+
 // parseSigV4AccessKeyID returns the AccessKeyId in an AWS4-HMAC-SHA256
 // Authorization header, or "" on malformed input.
 func parseSigV4AccessKeyID(auth string) string {

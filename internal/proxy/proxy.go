@@ -45,15 +45,18 @@ import (
 
 // Tree is the contract the proxy needs from the runtime budget tree.
 //
-// Admit pins an inbound api key + provider to a leaf and returns an
-// Admission ticket the proxy uses for the lifetime of the request. The
-// returned errors drive the proxy's HTTP response: ErrUnknownKey -> 401,
-// ErrThrottled -> Retry-After 429 (m2), ErrDenied -> 429 with
-// X-TokenCtl-Reason: budget_exceeded (m2). Snapshot returns whatever
+// Admit pins an inbound api key + provider + parsed model to a leaf and returns
+// an Admission ticket the proxy uses for the lifetime of the request. The
+// model (the parsed request `model` field, e.g. "claude-opus-4-") drives the
+// model_tiers sub-ceiling / cost_multiplier (feat_model_tier_override); pass
+// "" when no model is recoverable. The returned errors drive the proxy's HTTP
+// response: ErrUnknownKey -> 401, ErrThrottled -> Retry-After 429 (m2),
+// ErrDenied -> 429 with X-TokenCtl-Reason: budget_exceeded (m2, or
+// budget_exceeded_tier for a model-tier cap). Snapshot returns whatever
 // JSON-serialisable view powers `tokenctl top`; the proxy does not interpret
 // its shape.
 type Tree interface {
-	Admit(apiKey, provider string) (Admission, error)
+	Admit(apiKey, provider, model string) (Admission, error)
 	Snapshot() any
 }
 
@@ -103,6 +106,13 @@ var (
 	// emits 429 with X-TokenCtl-Reason: budget_exceeded and the leaf path in
 	// X-TokenCtl-Group.
 	ErrDenied = errors.New("tokenctl: budget exceeded")
+
+	// ErrTierDenied signals a hard deny at a model-tier sub-ceiling
+	// (feat_model_tier_override): it wraps ErrDenied so the proxy's 429 path
+	// still fires, but the reason header is budget_exceeded_tier. The budget
+	// package returns it when a tier's windowed counter crosses its own
+	// ceiling independently of the node's flat budget.
+	ErrTierDenied = fmt.Errorf("tokenctl: tier budget exceeded: %w", ErrDenied)
 )
 
 // statusClientClosedRequest is nginx's non-standard 499 "Client Closed
@@ -285,9 +295,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adm, err := s.tree.Admit(apiKey, prov.Name())
+	// Parse the request model so the budget tree can resolve a model_tiers
+	// sub-ceiling / cost_multiplier (feat_model_tier_override). Fail-soft: a
+	// model we cannot recover simply gets no tier applied.
+	model := prov.ModelFromRequest(r)
+
+	adm, err := s.tree.Admit(apiKey, prov.Name(), model)
 	if err != nil {
-		s.writeAdmitError(w, err)
+		s.writeAdmitError(w, err, model)
 		return
 	}
 	defer adm.Release()
@@ -315,11 +330,20 @@ func (s *Server) matchProvider(r *http.Request) providers.Provider {
 	return nil
 }
 
-func (s *Server) writeAdmitError(w http.ResponseWriter, err error) {
+func (s *Server) writeAdmitError(w http.ResponseWriter, err error, model string) {
 	switch {
 	case errors.Is(err, ErrUnknownKey):
 		w.Header().Set("X-TokenCtl-Reason", "unknown_key")
 		http.Error(w, "api key not bound to any tree leaf — add it to api_keys in tokenctl.yaml", http.StatusUnauthorized)
+	case errors.Is(err, ErrTierDenied):
+		// Model-tier sub-ceiling hard-deny (feat_model_tier_override): the
+		// leaf's parent budget has room, but this tier alone crossed its own
+		// ceiling, so sibling Haiku traffic on the same leaf keeps flowing.
+		w.Header().Set("X-TokenCtl-Reason", "budget_exceeded_tier")
+		if model != "" {
+			w.Header().Set("X-TokenCtl-Model", model)
+		}
+		http.Error(w, "tokenctl: model-tier budget exceeded", http.StatusTooManyRequests)
 	case errors.Is(err, ErrThrottled):
 		w.Header().Set("X-TokenCtl-Reason", "soft_throttle")
 		w.Header().Set("Retry-After", "10")

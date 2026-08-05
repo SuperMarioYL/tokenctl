@@ -176,6 +176,63 @@ func (s *Store) AppendAudit(e budget.AuditEvent) error {
 	})
 }
 
+// ScanAudit iterates the append-only audit log in insertion order (ascending
+// monotonic id) and calls fn for each event. fn returning false stops the scan.
+// Used by `tokenctl export` to reconstruct a window's spend from release
+// events (feat_cost_export_reconcile). Read-only — safe to run while the proxy
+// is live.
+func (s *Store) ScanAudit(fn func(budget.AuditEvent) bool) error {
+	if fn == nil {
+		return nil
+	}
+	return s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketAudit))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var e budget.AuditEvent
+			if err := json.Unmarshal(v, &e); err != nil {
+				// Skip unparseable rows rather than aborting the whole export —
+				// a corrupt row shouldn't blank a finance reconciliation.
+				continue
+			}
+			if !fn(e) {
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
+// ScanCounters iterates the persisted per-group windowed counters and calls fn
+// for each. fn returning false stops the scan. Used by `tokenctl export` to
+// reconcile the audit-derived token sums against the windowed snapshot
+// (feat_cost_export_reconcile). Read-only.
+func (s *Store) ScanCounters(fn func(group string, consumed int64, windowStart time.Time) bool) error {
+	if fn == nil {
+		return nil
+	}
+	return s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketCounters))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var rec counterRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				continue
+			}
+			if !fn(string(k), rec.Consumed, rec.WindowStart) {
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
 // flushLoop drains the dirty counter set into BoltDB on a ticker.
 func (s *Store) flushLoop() {
 	defer close(s.stopped)

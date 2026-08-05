@@ -29,7 +29,7 @@ func preemptScenario(t *testing.T) *Tree {
 // Context, which are not on the proxy.Admission interface).
 func admit(t *testing.T, tr *Tree, key, provider string) *Admission {
 	t.Helper()
-	a, err := tr.Admit(key, provider)
+	a, err := tr.Admit(key, provider, "")
 	if err != nil {
 		t.Fatalf("Admit(%q,%q): %v", key, provider, err)
 	}
