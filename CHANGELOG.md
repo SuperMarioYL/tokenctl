@@ -6,6 +6,112 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-10
+
+Release-reconciliation iteration. The live repo shipped v0.5.0 through v0.9.0
+(five releases, 2026-07-06 to 2026-08-05) with no base-plan milestone tracking;
+this release backfills regression + integration coverage for that already-shipped
+behaviour so further feature work lands on a guarded baseline. No new surface
+area, no behaviour change — the proxy metering (m1), tree soft/hard throttle
+(m2), and preemption (m3) behaviour is unchanged; this release only wraps it in
+tests and tightens the release surface.
+
+### Added
+- **Table-driven integration tests for the shipped proxy metering (m1).**
+  `cmd/tokenctl/metering_integration_test.go` streams a canned Claude SSE response
+  (`message_start` + cumulative `message_delta`) and a buffered JSON response
+  through the REAL `runProxy` path against an httptest upstream and asserts the
+  metered input/output tokens are attributed to the bound leaf and surface in
+  `/v1/snapshot`, so the streamed-token attribution the product headline rests on
+  is regression-guarded end-to-end (not just at the reader unit level).
+- **Table-driven end-to-end admit-contract tests for the tree weighting (m2).**
+  `cmd/tokenctl/proxy_contract_test.go` pre-seeds the BoltDB counters, starts the
+  real proxy, and asserts the status code + `X-TokenCtl-Reason` header for every
+  shipped admission outcome — admitted (200), unknown_key (401), missing_api_key
+  (401), soft_throttle (429), leaf budget_exceeded (429), and wallet budget_exceeded
+  (429) — pinning the m2 contract through the real CLI path the operator runs.
+- **Table-driven `tokenctl export` CLI tests (csv + json).**
+  `cmd/tokenctl/export_cli_test.go` exercises the `runExport` entrypoint across
+  format (csv|json), window defaulting, and invalid format/window rejection, so the
+  finance-reconciliation surface is guarded at the command level (not just the
+  formatter/reconciler unit level).
+- **Table-driven admit-precedence + reset-policy contract tests.**
+  `internal/budget/admit_precedence_test.go` pins the precedence order the m2/m3
+  arbiter depends on (tier hard-deny > node hard-deny > wallet hard-deny > node
+  soft-throttle > wallet soft-throttle) via a capturing audit state;
+  `internal/budget/reset_policy_table_test.go` consolidates the hard / rollover /
+  grace rollover contract into one table.
+- **`--version` flag.** `tokenctl --version` now prints the bare release tag
+  (`tokenctl v0.10.0`) for release-pinning scripts; the `tokenctl version`
+  subcommand retains the commit / OS / toolchain detail.
+
+### Changed
+- `VERSION` and the `main.Version` constant bumped to `v0.10.0`.
+
+## [0.9.0] - 2026-08-05
+
+Feature release. Three additive surfaces on top of the existing m1/m2/m3
+behaviour: per-model-tier budget overrides, a finance-reconciliation export,
+and a configurable budget window reset policy. No behaviour change to the
+proxy metering, tree throttle, or preemption paths.
+
+### Added
+- **Per-model-tier budget overrides.** A new `model_tiers` config block maps a
+  model-name regex to a `cost_multiplier` (for spend weighting) and/or a nested
+  `budget_tokens_per_window` sub-ceiling enforced as a hard 429 when that tier
+  alone crosses it. The tier window rolls over independently of the node window,
+  so a spike on an expensive model can be throttled without resetting the whole
+  node (feat_per_model_tier_override).
+- **`tokenctl export` finance-reconciliation surface.** A new `tokenctl export
+  --window <id> --format csv|json` subcommand compiles the `model_tiers`
+  resolver + pricing table and emits a per-(team, provider, model_tier) spend
+  table whose token sums reconcile against `tokenctl top`'s windowed snapshot
+  and whose `cost_estimate` column is a hand-verifiable price join
+  (feat_cost_export_reconcile). Backed by the new `internal/audit` reconcile
+  package, deliberately decoupled from config + the budget tree to avoid
+  import cycles and stay unit-testable against an in-memory fixture store.
+- **Configurable budget window reset policy.** A per-node `reset_policy`
+  (`hard` | `rollover` | `grace`) now controls how a node window resets: `hard`
+  zeroes spend on rollover, `rollover` carries surplus headroom into the next
+  window via a carry offset, and `grace` extends the prior window by a
+  configurable grace period before rolling over (feat_budget_reset_policy).
+- Go tests: `internal/budget/tier_test.go`, `internal/budget/reset_policy_test.go`,
+  `internal/config/features_test.go`, `cmd/tokenctl/export_test.go`, and
+  `internal/providers/model_test.go` pin the new model-tier, reset-policy,
+  config-feature, export, and provider-model resolution surfaces.
+
+## [0.8.0] - 2026-08-04
+
+Provider-metering correctness pass. One fix found by re-reading the shipped
+source: the OpenAI Responses API streaming responses were attributed zero
+tokens (silently bypassing the org cap and node budgets), and a mid-stream
+preempt on a non-streamed JSON response was an undetectable truncated body.
+
+### Fixed
+- **OpenAI Responses API streaming responses are now metered.** The Responses
+  API streams typed SSE events (`response.created`, `response.output_text.delta`,
+  `response.completed`, ...) and only the terminal `response.completed` carries
+  usage, nested under `response.usage` rather than at the top level. The OpenAI
+  meter's `Observe` blanket-returned 0 for any named event and only inspected
+  top-level `usage`, so a streaming `/v1/responses` request was attributed zero
+  tokens and silently bypassed the org cap and node budgets. `Observe` now
+  accepts the `response.completed` event and parses the nested `response.usage`
+  (MEDIUM).
+- **A mid-stream preempt on a non-streamed JSON response is now observable.**
+  Pre-header preemption already emits `499` + `X-TokenCtl-Reason`, but once a
+  JSON response's headers were flushed a mid-stream preempt just aborted the
+  copy — a truncated body the client fails to parse, indistinguishable from a
+  network error and invisible to the `tokenctl_preempt_signals_total` counter.
+  The buffered-JSON meter now records the `mid_stream` preempt path on the
+  counter (alongside the existing `pre_header` path) so both branches stay
+  observable (MEDIUM).
+
+### Added
+- Go tests: `internal/proxy/responses_meter_test.go` covers the Responses API
+  `response.completed` nested-usage parse, and `internal/proxy/mid_stream_preempt_test.go`
+  gains the JSON-body mid-stream preempt case asserting the `mid_stream` signal
+  counter increments.
+
 ## [0.7.0] - 2026-07-26
 
 Provider-routing correctness pass. One fix found by re-reading the shipped
@@ -224,7 +330,11 @@ First public cut. Three milestones land together as the v0.1 control plane.
 - Bilingual README (简体中文 primary, English sibling), Apache-2.0 license, GitHub
   Actions CI.
 
-[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.3.0...v0.4.0

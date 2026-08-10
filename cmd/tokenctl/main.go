@@ -33,9 +33,9 @@ import (
 
 // Version is the binary's release tag. Overridable at link time:
 //
-//	go build -ldflags "-X main.Version=v0.1.0 -X main.Commit=$(git rev-parse --short HEAD)"
+//	go build -ldflags "-X main.Version=v0.10.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "v0.9.0"
+	Version = "v0.10.0"
 	Commit  = "unknown"
 )
 
@@ -67,9 +67,13 @@ func newRootCmd() *cobra.Command {
 		Long:          longDescription,
 		SilenceUsage:  true,
 		SilenceErrors: false,
-		Version:       fmt.Sprintf("%s (commit %s, %s/%s)", Version, Commit, runtime.GOOS, runtime.GOARCH),
+		Version:       Version,
 	}
-	root.SetVersionTemplate("{{.Version}}\n")
+	// The `--version` flag prints the bare release tag (e.g. `tokenctl
+	// v0.10.0`) so release-pinning scripts and humans can grep a single line.
+	// The dedicated `tokenctl version` subcommand keeps the richer
+	// commit/OS/toolchain detail.
+	root.SetVersionTemplate("tokenctl {{.Version}}\n")
 	root.AddCommand(
 		newInitCmd(),
 		newUpCmd(),
