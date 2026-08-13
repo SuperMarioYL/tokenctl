@@ -78,13 +78,25 @@ func runExport(ctx context.Context, cmd *cobra.Command, cfgPath, window, format 
 	}
 	// Build the pricing table from the config (optional — unpriced traffic
 	// contributes 0 to cost_estimate rather than failing).
-	specs := make([]audit.PriceSpec, 0, len(cfg.Pricing.Models))
-	for _, mp := range cfg.Pricing.Models {
-		specs = append(specs, audit.PriceSpec{
-			Pattern:          mp.Pattern,
-			InputPerMillion:   mp.InputPerMillion,
-			OutputPerMillion:  mp.OutputPerMillion,
-		})
+	//
+	// Pricing is a *PricingConfig (yaml omitempty) that applyDefaults never
+	// initializes, and is absent from both `tokenctl init`'s Sample()
+	// (internal/config/config.go) and configs/tokenctl.example.yaml. Guard the
+	// nil path so a bare `tokenctl export -c tokenctl.yaml` on the shipped
+	// init/example config emits a valid zero-pricing export instead of panicking
+	// with a nil-pointer dereference on the finance-reconciliation surface
+	// (fix-export-nil-pricing-panic). The reconciler already tolerates an empty
+	// price table — unpriced traffic contributes 0 to cost_estimate.
+	var specs []audit.PriceSpec
+	if cfg.Pricing != nil {
+		specs = make([]audit.PriceSpec, 0, len(cfg.Pricing.Models))
+		for _, mp := range cfg.Pricing.Models {
+			specs = append(specs, audit.PriceSpec{
+				Pattern:          mp.Pattern,
+				InputPerMillion:  mp.InputPerMillion,
+				OutputPerMillion: mp.OutputPerMillion,
+			})
+		}
 	}
 	prices, err := audit.CompilePrices(specs)
 	if err != nil {

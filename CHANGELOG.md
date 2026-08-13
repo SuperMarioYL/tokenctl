@@ -6,6 +6,51 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-13
+
+Correctness-fix iteration. Two high-severity bugs found by re-grilling the
+shipped v0.10.0 source — both in the wiring between the CLI and the budget
+tree / export surface, no new surface area. Each fix ships with a Go
+regression test that fails on the unwired code.
+
+### Fixed
+- **`tokenctl export` no longer panics on a config with no `pricing` block.**
+  `runExport` unconditionally dereferenced `cfg.Pricing.Models`, but
+  `Config.Pricing` is a `*PricingConfig` (yaml `omitempty`) that `applyDefaults`
+  never initializes, and is absent from both `tokenctl init`'s `Sample()` and the
+  shipped `configs/tokenctl.example.yaml`. The `export_cli_test` fixtures always
+  injected a pricing block, so the nil path was untested — a bare
+  `tokenctl export -c tokenctl.yaml` on the shipped init/example config panicked
+  with a nil-pointer dereference on the finance-reconciliation surface the
+  command exists for. `runExport` now nil-guards `cfg.Pricing` before the deref;
+  unpriced traffic already contributed 0 to `cost_estimate` (the reconciler
+  tolerates an empty price table), so a no-pricing config now emits a valid
+  zero-pricing export instead of panicking (HIGH).
+- **`tokenctl up` now actually enforces per-model-tier overrides.**
+  `runProxyCtx` wired `BindAll` + `SetWallet` but never called
+  `tree.SetModelTiers(cfg.ModelTiers)`, so `t.tiers` stayed empty and
+  `resolveTier()` returned `nil` for every model — the entire v0.9.0
+  per-model-tier override feature (`cost_multiplier` +
+  `budget_tokens_per_window` sub-ceilings, e.g. capping an Opus swarm
+  independently) was silently never enforced at runtime, even though
+  `config.Load` validates the block. Unit tests masked it because they call
+  `SetModelTiers` directly, bypassing the CLI path. `runProxyCtx` now calls
+  `tree.SetModelTiers(cfg.ModelTiers)` after `SetWallet`; the call is a no-op on
+  an empty slice and idempotent, so configs without a `model_tiers:` block are
+  unaffected (HIGH).
+
+### Added
+- Go regression tests: `cmd/tokenctl/export_cli_test.go` gains
+  `TestExportCLINoPricingBlock`, which runs `runExport` on a config with no
+  `pricing:` block (mirroring `tokenctl init`'s `Sample()` + the example config)
+  and asserts it does not panic and reconciles the seeded release to a
+  zero-`cost_estimate` row; `cmd/tokenctl/main_test.go` gains
+  `TestRunProxyWiresModelTiers`, which starts the real proxy via `runProxyCtx`
+  against a config with an opus `model_tiers` sub-ceiling and asserts the
+  tier-capped Opus request is hard-denied with `429` +
+  `X-TokenCtl-Reason: budget_exceeded_tier` and never reaches the upstream —
+  failing on the unwired code (the request is admitted `200`).
+
 ## [0.10.0] - 2026-08-10
 
 Release-reconciliation iteration. The live repo shipped v0.5.0 through v0.9.0
@@ -330,7 +375,8 @@ First public cut. Three milestones land together as the v0.1 control plane.
 - Bilingual README (简体中文 primary, English sibling), Apache-2.0 license, GitHub
   Actions CI.
 
-[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/tokenctl/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/SuperMarioYL/tokenctl/compare/v0.7.0...v0.8.0

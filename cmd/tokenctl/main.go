@@ -33,9 +33,9 @@ import (
 
 // Version is the binary's release tag. Overridable at link time:
 //
-//	go build -ldflags "-X main.Version=v0.10.0 -X main.Commit=$(git rev-parse --short HEAD)"
+//	go build -ldflags "-X main.Version=v0.11.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "v0.10.0"
+	Version = "v0.11.0"
 	Commit  = "unknown"
 )
 
@@ -70,7 +70,7 @@ func newRootCmd() *cobra.Command {
 		Version:       Version,
 	}
 	// The `--version` flag prints the bare release tag (e.g. `tokenctl
-	// v0.10.0`) so release-pinning scripts and humans can grep a single line.
+	// v0.11.0`) so release-pinning scripts and humans can grep a single line.
 	// The dedicated `tokenctl version` subcommand keeps the richer
 	// commit/OS/toolchain detail.
 	root.SetVersionTemplate("tokenctl {{.Version}}\n")
@@ -180,6 +180,17 @@ func runProxyCtx(ctx context.Context, cmd *cobra.Command, cfgPath string) error 
 	}
 	if err := tree.SetWallet(cfg.Wallet); err != nil {
 		return fmt.Errorf("set wallet: %w", err)
+	}
+	// Wire the per-model-tier overrides (cost_multiplier +
+	// budget_tokens_per_window sub-ceilings) into the tree. Without this call
+	// t.tiers stays empty and resolveTier() returns nil for every model, so the
+	// entire v0.9.0 per-model-tier feature is a silent no-op at runtime — only
+	// exercised in internal/budget/tier_test.go, which calls SetModelTiers
+	// directly and bypasses this CLI path. SetModelTiers is a no-op on an empty
+	// slice and idempotent, so configs without a model_tiers: block are
+	// unaffected (fix-model-tiers-not-wired-in-main).
+	if err := tree.SetModelTiers(cfg.ModelTiers); err != nil {
+		return fmt.Errorf("set model tiers: %w", err)
 	}
 
 	srv, err := proxy.New(cfg, state, tree)

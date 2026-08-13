@@ -281,3 +281,133 @@ api_keys:
 		t.Fatal("runProxy did not return after cancel")
 	}
 }
+
+// TestRunProxyWiresModelTiers is the fix-model-tiers-not-wired-in-main
+// regression. runProxyCtx wired BindAll + SetWallet but never called
+// tree.SetModelTiers, so t.tiers stayed empty and resolveTier() returned nil
+// for every model — the entire v0.9.0 per-model-tier override feature
+// (cost_multiplier + budget_tokens_per_window sub-ceilings) was a silent no-op
+// at runtime, only exercised in internal/budget/tier_test.go which calls
+// SetModelTiers directly and bypasses this CLI path.
+//
+// This starts the REAL proxy via runProxyCtx (the path `tokenctl up` takes)
+// against a config with an opus model_tier whose budget_tokens_per_window
+// sub-ceiling (1000 tokens) is smaller than the default per-request reserve
+// (8000 * cost_multiplier 10 = 80000 attributed). The tier hard-deny runs at
+// Admit time, BEFORE the node chain, so the FIRST Opus request is hard-denied
+// at the tier ceiling with X-TokenCtl-Reason: budget_exceeded_tier and NEVER
+// reaches the stub upstream.
+//
+// Against the unwired code this test FAILS: resolveTier returns nil (no tiers
+// installed), so no tier check fires, the request is admitted (200) and reaches
+// the upstream — the tier cap is never enforced through the CLI/proxy path.
+func TestRunProxyWiresModelTiers(t *testing.T) {
+	var upstreamHits int
+	// Stub Anthropic upstream. The tier cap must deny at Admit time, so a
+	// well-behaved proxy NEVER calls the upstream for the capped Opus request.
+	upstream := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(rw, `{"id":"m","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tokenctl.yaml")
+	proxyAddr := freePort(t)
+	metricsAddr := freePort(t)
+
+	// Large node + leaf budgets (soft_throttle_at=1.0 so only hard-denies fire)
+	// and NO wallet — so the ONLY binding constraint is the opus tier
+	// sub-ceiling. The tier carries cost_multiplier=10 + a 1000-token
+	// budget_tokens_per_window; with the default 8000-token reserve the
+	// attributed reservation (80000) exceeds the tier ceiling on the first
+	// Opus admit, exercising the tier hard-deny path.
+	cfg := fmt.Sprintf(`version: v0.1
+listen: %q
+store:
+  path: tokenctl.db
+metrics:
+  listen: %q
+  path: /metrics
+providers:
+  - name: claude
+    upstream: %q
+tree:
+  name: acme
+  weight: 100
+  budget:
+    tokens: 100000000
+    window: 24h
+    soft_throttle_at: 1.0
+  children:
+    - name: alice
+      weight: 100
+      budget:
+        tokens: 100000000
+        window: 24h
+        soft_throttle_at: 1.0
+api_keys:
+  - key: alice-key
+    group: acme.alice
+model_tiers:
+  - name: opus
+    pattern: "claude-opus.*"
+    cost_multiplier: 10
+    budget_tokens_per_window:
+      tokens: 1000
+      window: 1h
+      soft_throttle_at: 1.0
+`, proxyAddr, metricsAddr, upstream.URL)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.SetOut(io.Discard)
+	runErr := make(chan error, 1)
+	go func() { runErr <- runProxyCtx(ctx, cmd, cfgPath) }()
+
+	base := "http://" + proxyAddr
+	waitHealthy(t, base)
+
+	// Send a Claude Messages request carrying the Opus model. The proxy parses
+	// the model field and hands it to Tree.Admit, which resolves the opus tier
+	// and hard-denies at the tier sub-ceiling.
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-4-20250514"}`))
+	req.Header.Set("x-api-key", "alice-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("opus request status = %d, want 429 (tier cap enforced via runProxyCtx wiring); body=%q reason=%q\n"+
+			"If status was 200, tree.SetModelTiers was never called in runProxyCtx — resolveTier returned nil and the tier cap was a silent no-op.",
+			resp.StatusCode, body, resp.Header.Get("X-TokenCtl-Reason"))
+	}
+	if got := resp.Header.Get("X-TokenCtl-Reason"); got != "budget_exceeded_tier" {
+		t.Fatalf("X-TokenCtl-Reason = %q, want budget_exceeded_tier (the tier sub-ceiling must fire, not a node/wallet budget_exceeded)", got)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("tier-capped Opus request reached the upstream %d time(s) — a tier hard-deny at Admit must short-circuit before proxying", upstreamHits)
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !strings.Contains(err.Error(), "context canceled") {
+			t.Fatalf("runProxy returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runProxy did not return after cancel")
+	}
+}
