@@ -236,3 +236,155 @@ func TestTree_TierCapWithConcurrentReservation(t *testing.T) {
 		a.Release()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// fix-tier-counter-not-persisted-across-restart
+// ---------------------------------------------------------------------------
+
+// tierTreeWithState builds a single-leaf tier tree backed by st (so SaveCounter
+// / LoadCounter round-trip through it), with the arbiter stopped and the
+// reservation disabled so attribution is exact. Mirrors newWalletTree for the
+// tier path; used by the restart-persistence regression.
+func tierTreeWithState(t *testing.T, st State, tiers []config.ModelTier) *Tree {
+	t.Helper()
+	root := budgetNode("org", 1, 1_000_000, 0.999)
+	tr, err := NewTree(root, st)
+	if err != nil {
+		t.Fatalf("NewTree: %v", err)
+	}
+	tr.SetReserveEstimate(0)
+	tr.arb.shutdown()
+	t.Cleanup(func() { _ = tr.Close() })
+	if err := tr.Bind("k", "org"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if err := tr.SetModelTiers(tiers); err != nil {
+		t.Fatalf("SetModelTiers: %v", err)
+	}
+	return tr
+}
+
+// opusTierConsumed reads the current-window consumed for the named tier via the
+// public TierStats view (which applies the lazy rollover the production read
+// path uses), so the assertion reflects what an operator / `tokenctl top` sees.
+func opusTierConsumed(tr *Tree) int64 {
+	for _, s := range tr.TierStats() {
+		if s.Name == "opus" {
+			return s.ConsumedTokens
+		}
+	}
+	return -1
+}
+
+// TestTree_TierCounterPersistsAcrossRestart is the regression for
+// fix-tier-counter-not-persisted-across-restart: attribute() must persist the
+// per-tier windowed counter via SaveCounter on every attribution (mirroring
+// the node path at tree.go:906 and the wallet path at tree.go:941), and
+// SetModelTiers must restore it via LoadCounter (mirroring buildNode at
+// tree.go:499-505). Without both halves the per-tier hard sub-ceiling was the
+// ONLY budget counter not durable across restarts: a crash / SIGKILL / OOM /
+// deployment mid-window reset the tier consumed to 0 and silently allowed up to
+// ~2x the intended per-window spend (N before restart + N after in the same
+// wall-clock window), defeating the v0.9.0 tier compliance guarantee.
+func TestTree_TierCounterPersistsAcrossRestart(t *testing.T) {
+	st := newMemState()
+	tr := tierTreeWithState(t, st, opusHaikuTiers())
+
+	// Window 1, pre-crash: 50 raw Opus tokens * mult 10 = 500 attributed. The
+	// tier ceiling is 1000, so the tier is at 50% — under the cap but enough
+	// that a restart mid-window must NOT zero it.
+	adm, err := tr.Admit("k", "claude", "claude-opus-4-20250514")
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	adm.AddInput(50)
+	adm.Release()
+
+	// The tier counter must have been persisted DURING attribution (the fix),
+	// not only on graceful Close — the same guarantee the wallet counter has.
+	if got, ok := st.saved("__tier__opus"); !ok || got != 500 {
+		t.Fatalf("__tier__opus persisted = %d (ok=%v), want 500 (SaveCounter on attribution, not only on Close)", got, ok)
+	}
+
+	// Simulate a crash mid-window: build a fresh tree from the SAME state and
+	// re-apply SetModelTiers, which must LoadCounter and restore the tier's
+	// pre-crash consumed + windowStart — mirroring how buildNode restores node
+	// counters. (tr's Close runs at test cleanup, AFTER the assertions, so it
+	// does not affect the reload semantics here.)
+	tr2, err := NewTree(budgetNode("org", 1, 1_000_000, 0.999), st)
+	if err != nil {
+		t.Fatalf("NewTree reload: %v", err)
+	}
+	tr2.SetReserveEstimate(0)
+	tr2.arb.shutdown()
+	t.Cleanup(func() { _ = tr2.Close() })
+	if err := tr2.Bind("k", "org"); err != nil {
+		t.Fatalf("Bind reload: %v", err)
+	}
+	if err := tr2.SetModelTiers(opusHaikuTiers()); err != nil {
+		t.Fatalf("SetModelTiers reload: %v", err)
+	}
+
+	// The opus tier must have reloaded the pre-crash spend, not 0.
+	if got := opusTierConsumed(tr2); got != 500 {
+		t.Fatalf("reloaded opus tier consumed = %d, want 500 (pre-crash spend must survive restart via LoadCounter, not reset to 0)", got)
+	}
+
+	// The hard cap must survive the restart: crediting another 500 attributed
+	// (50 raw * mult 10) brings the tier to the 1000-token ceiling, and the
+	// NEXT Opus admit must be ErrTierDenied. Without the fix the tier would
+	// have reloaded as 0, so this admit would succeed — silently allowing up
+	// to ~2x the intended per-window spend in the same wall-clock window.
+	adm2, err := tr2.Admit("k", "claude", "claude-opus-4-20250514")
+	if err != nil {
+		t.Fatalf("post-restart Admit: %v", err)
+	}
+	adm2.AddInput(50) // +500 attributed → tier now at the 1000 ceiling
+	adm2.Release()
+	if _, err := tr2.Admit("k", "claude", "claude-opus-4-20250514"); !errors.Is(err, ErrTierDenied) {
+		t.Fatalf("post-restart Opus admit err = %v, want ErrTierDenied (tier hard cap must survive restart; cumulative windowed spend enforced)", err)
+	}
+}
+
+// TestTree_TierCounterIdempotentOnEmptyTiers guards the "configs without a
+// model_tiers block are unaffected" acceptance criterion: SetModelTiers on an
+// empty slice remains a no-op + idempotent after the LoadCounter/SaveCounter
+// wiring, and attribute()/flushAll() skip the (empty) tier path cleanly.
+func TestTree_TierCounterIdempotentOnEmptyTiers(t *testing.T) {
+	st := newMemState()
+	tr, err := NewTree(budgetNode("org", 1, 1_000_000, 0.8), st)
+	if err != nil {
+		t.Fatalf("NewTree: %v", err)
+	}
+	tr.SetReserveEstimate(0)
+	tr.arb.shutdown()
+	t.Cleanup(func() { _ = tr.Close() })
+	if err := tr.Bind("k", "org"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	// Empty tiers: no-op, no error.
+	if err := tr.SetModelTiers(nil); err != nil {
+		t.Fatalf("SetModelTiers(nil): %v", err)
+	}
+	// Idempotent re-apply.
+	if err := tr.SetModelTiers(nil); err != nil {
+		t.Fatalf("SetModelTiers(nil) second call: %v", err)
+	}
+
+	adm, err := tr.Admit("k", "claude", "")
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	adm.AddInput(100)
+	adm.Release()
+
+	// No tier counter key should have been written.
+	if _, ok := st.saved("__tier__"); ok {
+		t.Fatal("an empty __tier__ key should not be written when no tiers are configured")
+	}
+	// flushAll (also called by Close at cleanup) must not panic or write tier
+	// keys for the empty set — exercised implicitly by t.Cleanup; assert the
+	// close path explicitly here too.
+	tr.flushAll()
+}

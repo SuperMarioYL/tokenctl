@@ -1,7 +1,10 @@
 package budget
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -869,5 +872,96 @@ func TestTree_ProviderConsumedResetsOnWalletRollover(t *testing.T) {
 		tr.walletSnapshot() // lazy rollover + provider reset
 		spend(t, tr, "openai", 30_000)
 		assertWindow2(t, tr)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// fix-audit-append-error-silently-swallowed
+// ---------------------------------------------------------------------------
+
+// failingAuditState wraps an in-memory state whose AppendAudit always returns
+// the configured error, so the appendAudit error-handling path can be exercised
+// without a real bbolt failure (closed DB / disk-full / transient tx error).
+// SaveCounter / LoadCounter delegate to the embedded memState so the rest of
+// the tree still behaves normally.
+type failingAuditState struct {
+	*memState
+	err error
+}
+
+func (f *failingAuditState) AppendAudit(AuditEvent) error { return f.err }
+
+// captureLogger builds a slog.Logger writing TextHandler records into buf at
+// Error level, so a test can assert a specific failure was logged.
+func captureLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+// TestTree_AuditAppendFailureIsSurfaced is the regression for
+// fix-audit-append-error-silently-swallowed: when state.AppendAudit fails (a
+// synchronous bbolt write tx can fail on disk-full, a transient bbolt error,
+// or a closed DB) appendAudit must NOT silently swallow the error — it logs
+// (slog.Error carrying the event kind + group + error) and increments the
+// tokenctl_audit_write_failures_total counter (read from
+// Tree.auditWriteFailures) so the operator has a signal that audit events are
+// being lost instead of vanishing into a silent compliance hole. The admission
+// path must not panic. The happy path (AppendAudit returns nil) is unchanged:
+// no log, no counter bump, no added latency.
+func TestTree_AuditAppendFailureIsSurfaced(t *testing.T) {
+	t.Run("failing_append_is_logged_and_counted_no_panic", func(t *testing.T) {
+		st := &failingAuditState{memState: newMemState(), err: errors.New("bbolt: tx closed")}
+		tr := newWalletTree(t, st, 1_000_000)
+
+		var buf bytes.Buffer
+		tr.log = captureLogger(&buf)
+
+		// Admit + Release each fire one appendAudit (admit, release). Both
+		// must fail against the failing state. The admission path must NOT
+		// panic — if it did the test would fail here before the assertions.
+		adm, err := tr.Admit("k", "claude", "")
+		if err != nil {
+			t.Fatalf("Admit: %v (the failing AppendAudit must not break the admission path)", err)
+		}
+		adm.Release()
+
+		if got := tr.auditWriteFailures.Load(); got != 2 {
+			t.Fatalf("auditWriteFailures = %d, want 2 (admit + release both lost) — the AppendAudit error must be counted, not silently swallowed", got)
+		}
+		logOut := buf.String()
+		if !strings.Contains(logOut, "audit append failed") {
+			t.Fatalf("expected an slog.Error \"audit append failed\" record surfacing the lost event, got log:\n%s", logOut)
+		}
+		// The log must carry the event kinds (admit + release) so the operator
+		// can see WHICH lifecycle events are being dropped.
+		if !strings.Contains(logOut, "admit") || !strings.Contains(logOut, "release") {
+			t.Fatalf("expected the log to carry both event kinds (admit/release), got log:\n%s", logOut)
+		}
+		// The log must carry the underlying error so the root cause is visible.
+		if !strings.Contains(logOut, "bbolt: tx closed") {
+			t.Fatalf("expected the log to carry the underlying AppendAudit error, got log:\n%s", logOut)
+		}
+	})
+
+	t.Run("happy_path_unchanged", func(t *testing.T) {
+		// A working state (AppendAudit returns nil) must not log or bump the
+		// counter — the priced/normal-config happy path is unchanged and the
+		// hot path stays synchronous with no added latency.
+		st := newMemState()
+		tr := newWalletTree(t, st, 1_000_000)
+		var buf bytes.Buffer
+		tr.log = captureLogger(&buf)
+
+		adm, err := tr.Admit("k", "claude", "")
+		if err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		adm.Release()
+
+		if got := tr.auditWriteFailures.Load(); got != 0 {
+			t.Fatalf("auditWriteFailures = %d, want 0 on the happy path (AppendAudit succeeded)", got)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("expected no log on the happy path, got:\n%s", buf.String())
+		}
 	})
 }

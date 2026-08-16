@@ -6,6 +6,44 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-17
+
+Correctness-fix iteration, fixes-only. Two medium-severity bugs found by
+re-grilling the shipped v0.11.0 source — both in the budget tree's audit and
+persistence paths, no new surface area. Each fix ships with a Go regression
+test that fails on the unfixed code.
+
+### Fixed
+- **Audit-log write failures are no longer silently swallowed.**
+  `appendAudit` discarded the `state.AppendAudit` error via `_ =`, even though
+  the store's `AppendAudit` is a synchronous bbolt write transaction
+  (state.go:159-177) that can fail on disk-full, a transient bbolt error, or a
+  closed DB, and the store package's own doc-comment (state.go:17-18) warns
+  that losing an audit event "is a compliance hole." When the tx failed the
+  event was lost with no log, metric, retry, or operator signal — an asymmetry
+  with the already-fixed counter-flush path (which re-queues records on tx
+  error). Every admission lifecycle event (admit/deny/throttle/preempt/release)
+  flows through this path, so a sustained bbolt failure silently blanked the
+  audit log the `tokenctl export` reconciler depends on. `appendAudit` now
+  logs the failure (`slog.Error` with the event kind + group + error) and
+  increments `tokenctl_audit_write_failures_total`; the admission path does not
+  panic and the hot path stays synchronous (MEDIUM).
+- **Model-tier sub-ceiling counters now persist across a restart.**
+  `attribute()` credited the per-tier windowed counter (`ts.consumed += n`) but
+  never called `state.SaveCounter` for the tier — unlike the node chain
+  (persisted on every attribution) and the org wallet (also persisted).
+  Symmetrically, `SetModelTiers` built each `tierState` with a fresh
+  `windowStart=now` / `consumed=0` and never called `state.LoadCounter` —
+  unlike `buildNode`, which restores each node's counter from the store. The
+  per-tier hard sub-ceiling (`feat_model_tier_override`) was therefore the
+  ONLY budget counter not durable across restarts: a crash / SIGKILL / OOM /
+  deployment mid-window reset the tier consumed to 0 and started a fresh tier
+  window, so an Opus-tier hard cap of N tokens/window silently allowed up to
+  ~2x the intended spend (N before restart + N after) in the same wall-clock
+  window. `attribute()` now persists the tier counter via `SaveCounter` with a
+  stable `__tier__`+name key, `SetModelTiers` restores it via `LoadCounter`
+  (mirroring `buildNode`), and `flushAll()` persists tier counters for symmetry
+  with node + wallet (MEDIUM).
 ## [0.11.0] - 2026-08-13
 
 Correctness-fix iteration. Two high-severity bugs found by re-grilling the

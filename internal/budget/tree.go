@@ -24,6 +24,7 @@ package budget
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"sort"
@@ -110,6 +111,13 @@ type Tree struct {
 
 	state State
 
+	// log is the tree's structured logger. Admission lifecycle audit appends
+	// are synchronous (the store's AppendAudit runs a bbolt write tx); when that
+	// tx fails the event is lost forever unless the failure is surfaced here,
+	// so the operator has a signal that audit events are being dropped
+	// (fix-audit-append-error-silently-swallowed). Defaults to slog.Default().
+	log *slog.Logger
+
 	mu             sync.Mutex
 	walletConsumed int64
 	// walletReserved mirrors walletConsumed for in-flight admissions: the sum
@@ -130,6 +138,14 @@ type Tree struct {
 	deniesTotal       atomic.Int64
 	throttlesTotal    atomic.Int64
 	preemptsTotal     atomic.Int64
+	// auditWriteFailures counts audit events lost to AppendAudit errors. The
+	// store's AppendAudit is a synchronous bbolt write tx that can fail on
+	// disk-full, a transient bbolt error, or a closed DB; without this counter
+	// the failure was silently swallowed (the old `_ = t.state.AppendAudit(e)`)
+	// and the audit log the `tokenctl export` reconciler depends on blanked
+	// with no operator signal (fix-audit-append-error-silently-swallowed).
+	// Surfaced as tokenctl_audit_write_failures_total.
+	auditWriteFailures atomic.Int64
 
 	arb *arbiter
 
@@ -140,6 +156,7 @@ type Tree struct {
 	descDenies   *prometheus.Desc
 	descThrottle *prometheus.Desc
 	descPreempts *prometheus.Desc
+	descAuditFailures *prometheus.Desc
 }
 
 // node is the runtime counterpart of config.GroupConfig.
@@ -241,6 +258,14 @@ type tierState struct {
 	denies      int64
 }
 
+// tierCounterKey is the stable store key for a model-tier's windowed counter.
+// Mirrors the node path + "__wallet__" naming so the tier counter round-trips
+// through SaveCounter / LoadCounter the same way (node path = group, wallet =
+// "__wallet__", tier = "__tier__"+name). Used in attribute(), SetModelTiers,
+// and flushAll() so a crash mid-window no longer resets the tier hard cap
+// (fix-tier-counter-not-persisted-across-restart).
+func tierCounterKey(name string) string { return "__tier__" + name }
+
 // maybeRolloverLocked resets the tier window against now if elapsed. The caller
 // MUST hold ts.mu. Reservations are NOT zeroed on rollover (an in-flight
 // request straddling a boundary still holds real headroom).
@@ -292,6 +317,7 @@ func NewTree(root *config.GroupConfig, state any) (*Tree, error) {
 		providerConsumed: map[string]int64{},
 		tierByName:       map[string]*tierState{},
 		reserveEstimate:  defaultReserveEstimate,
+		log:              slog.Default().With("subsystem", "budget"),
 	}
 	if s, ok := state.(State); ok {
 		t.state = s
@@ -411,6 +437,21 @@ func (t *Tree) SetModelTiers(tiers []config.ModelTier) error {
 			}
 			ts.budget = mt.BudgetTokensPerWindow.Tokens
 			ts.windowD = d
+		}
+		// Restore the per-tier windowed counter from the store so a crash /
+		// SIGKILL / OOM / deployment mid-window no longer zeroes the tier hard
+		// cap and silently allows up to ~2x the intended per-window spend. The
+		// node chain already does this in buildNode (lines 499-505); the tier
+		// counter is the ONLY budget counter not durable across restarts
+		// without this call (fix-tier-counter-not-persisted-across-restart).
+		// As in buildNode, a stored window that has since elapsed is restored
+		// and then lazily rolled over to 0 by maybeRolloverLocked on first
+		// access, so a stale window is harmless.
+		if t.state != nil {
+			if c, ws, lerr := t.state.LoadCounter(tierCounterKey(mt.Name)); lerr == nil && !ws.IsZero() {
+				ts.consumed = c
+				ts.windowStart = ws
+			}
 		}
 		out = append(out, ts)
 		byName[mt.Name] = ts
@@ -554,6 +595,16 @@ func (t *Tree) flushAll() {
 		c, ws := t.walletConsumed, t.walletWindowStart
 		t.mu.Unlock()
 		_ = t.state.SaveCounter("__wallet__", c, ws)
+	}
+	// Persist per-tier windowed counters for symmetry with the node + wallet
+	// paths so a graceful Close survives a subsequent restart mid-window too
+	// (fix-tier-counter-not-persisted-across-restart). Idempotent; no-op when
+	// no model_tiers are configured.
+	for _, ts := range t.tiers {
+		ts.mu.Lock()
+		c, ws := ts.consumed, ts.windowStart
+		ts.mu.Unlock()
+		_ = t.state.SaveCounter(tierCounterKey(ts.name), c, ws)
 	}
 }
 
@@ -959,7 +1010,17 @@ func (t *Tree) attribute(a *Admission, rawN int64) {
 				ts.reserved = 0
 			}
 		}
+		c, ws := ts.consumed, ts.windowStart
 		ts.mu.Unlock()
+		// Persist the per-tier windowed counter on every attribution, not only
+		// on graceful Close, so a crash / SIGKILL / OOM between windows cannot
+		// zero the tier hard cap mid-window (the node + wallet paths already
+		// persist above). Without this the per-tier hard sub-ceiling was the
+		// ONLY budget counter not durable across restarts
+		// (fix-tier-counter-not-persisted-across-restart).
+		if t.state != nil {
+			_ = t.state.SaveCounter(tierCounterKey(ts.name), c, ws)
+		}
 	}
 }
 
@@ -1125,6 +1186,11 @@ func (t *Tree) initPromDescs() {
 		"Total admissions cancelled by the arbiter.",
 		nil, nil,
 	)
+	t.descAuditFailures = prometheus.NewDesc(
+		"tokenctl_audit_write_failures_total",
+		"Total audit events lost to an AppendAudit write-transaction failure (disk-full, transient bbolt error, closed DB).",
+		nil, nil,
+	)
 }
 
 // Describe implements prometheus.Collector.
@@ -1136,6 +1202,7 @@ func (t *Tree) Describe(ch chan<- *prometheus.Desc) {
 	ch <- t.descDenies
 	ch <- t.descThrottle
 	ch <- t.descPreempts
+	ch <- t.descAuditFailures
 }
 
 // Collect implements prometheus.Collector by walking the current tree state.
@@ -1159,6 +1226,7 @@ func (t *Tree) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(t.descDenies, prometheus.CounterValue, float64(t.deniesTotal.Load()))
 	ch <- prometheus.MustNewConstMetric(t.descThrottle, prometheus.CounterValue, float64(t.throttlesTotal.Load()))
 	ch <- prometheus.MustNewConstMetric(t.descPreempts, prometheus.CounterValue, float64(t.preemptsTotal.Load()))
+	ch <- prometheus.MustNewConstMetric(t.descAuditFailures, prometheus.CounterValue, float64(t.auditWriteFailures.Load()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,11 +1404,34 @@ func frac(consumed, budget int64) float64 {
 	return float64(consumed) / float64(budget)
 }
 
+// appendAudit records a terminal admission-lifecycle event (admit / deny /
+// throttle / preempt / release) via the state store. The store's AppendAudit
+// is a synchronous bbolt write transaction (state.go:159-177) that can fail on
+// disk-full, a transient bbolt error, or a closed DB. The store package's own
+// doc-comment (state.go:17-18) warns that "losing one is a compliance hole,"
+// so a failure here must NOT be silently swallowed: we log it (slog.Error with
+// the event kind + group + error) and increment tokenctl_audit_write_failures
+// so the operator has a signal that audit events are being dropped. We do NOT
+// panic or block the admission hot path (the bbolt tx is already synchronous,
+// so logging + an atomic add add no latency) — the event is dropped
+// defensively, matching the asymmetry the already-fixed counter-flush path
+// (state.go flush() re-queues on tx error) closes for counter writes
+// (fix-audit-append-error-silently-swallowed).
 func (t *Tree) appendAudit(e AuditEvent) {
 	if t.state == nil {
 		return
 	}
-	_ = t.state.AppendAudit(e)
+	if err := t.state.AppendAudit(e); err != nil {
+		t.auditWriteFailures.Add(1)
+		if t.log != nil {
+			t.log.Error("audit append failed",
+				"kind", e.Kind,
+				"group", e.Group,
+				"provider", e.Provider,
+				"model", e.Model,
+				"err", err)
+		}
+	}
 }
 
 // debugString is a compact dump of the tree, useful only for tests / dev.
