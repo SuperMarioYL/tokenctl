@@ -186,6 +186,12 @@ type bedrockUsage struct {
 	OutputTokensSnake    int64 `json:"output_tokens"`
 	PromptTokenCount     int64 `json:"prompt_token_count"`
 	GenerationTokenCount int64 `json:"generation_token_count"`
+	// cache_creation_input_tokens / cache_read_input_tokens are present on
+	// Anthropic-on-Bedrock usage blocks (the prompt-cache billable input
+	// surface). They are ADDITIVE to input_tokens, so the meter sums them
+	// rather than pickMax-ing them (fix-claude-meter-drops-cache-input-tokens).
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
 // Multiple top-level shapes — we union them into one struct via a single
@@ -215,6 +221,11 @@ func (m *bedrockMeter) Observe(event string, data []byte) (int64, int64) {
 	var in, out int64
 	if env.Usage != nil {
 		in = pickMax(env.Usage.InputTokens, env.Usage.InputTokensSnake, env.Usage.PromptTokenCount)
+		// Anthropic-on-Bedrock reports the prompt-cache billable input as
+		// separate cache fields; they are additive to input_tokens, so a
+		// cached turn attributes its full input cost (mirroring the claude
+		// provider). Absent (zero) on non-Anthropic Bedrock shapes.
+		in += env.Usage.CacheCreationInputTokens + env.Usage.CacheReadInputTokens
 		out = pickMax(env.Usage.OutputTokens, env.Usage.OutputTokensSnake, env.Usage.GenerationTokenCount)
 	}
 	if env.PromptTokenCount > in {

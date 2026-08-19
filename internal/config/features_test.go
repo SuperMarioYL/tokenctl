@@ -83,10 +83,10 @@ model_tiers:
 // fields.
 func TestLoadResetPolicyBareScalar(t *testing.T) {
 	cases := []struct {
-		name string
-		yaml string
+		name     string
+		yaml     string
 		wantMode string
-		wantPct float64
+		wantPct  float64
 	}{
 		{name: "bare_hard", yaml: "hard", wantMode: "hard"},
 		{name: "object_rollover", yaml: "{mode: rollover, rollover_cap_pct: 50}", wantMode: "rollover", wantPct: 50},

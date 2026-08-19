@@ -14,10 +14,10 @@ import (
 func resetNode(t *testing.T, p *config.ResetPolicy) *Tree {
 	t.Helper()
 	root := &config.GroupConfig{
-		Name:         "org",
-		Weight:       1,
-		Budget:       &config.TokenBudget{Tokens: 1000, Window: "50ms", SoftThrottleAt: 0.999},
-		ResetPolicy:  p,
+		Name:        "org",
+		Weight:      1,
+		Budget:      &config.TokenBudget{Tokens: 1000, Window: "50ms", SoftThrottleAt: 0.999},
+		ResetPolicy: p,
 	}
 	tr := newTestTree(t, root)
 	if err := tr.Bind("k", "org"); err != nil {
@@ -137,9 +137,9 @@ func TestTree_HardResetPolicyIsZeroCarry(t *testing.T) {
 // reset fires.
 func TestTree_GracePolicyKeepsOldWindowLive(t *testing.T) {
 	root := &config.GroupConfig{
-		Name:   "org",
-		Weight: 1,
-		Budget: &config.TokenBudget{Tokens: 1000, Window: "50ms", SoftThrottleAt: 0.999},
+		Name:        "org",
+		Weight:      1,
+		Budget:      &config.TokenBudget{Tokens: 1000, Window: "50ms", SoftThrottleAt: 0.999},
 		ResetPolicy: &config.ResetPolicy{Mode: "grace", GracePeriod: "100ms"},
 	}
 	tr := newTestTree(t, root)
@@ -172,9 +172,9 @@ func TestTree_GracePolicyKeepsOldWindowLive(t *testing.T) {
 // sum(child.consumed) <= parent.consumed holds after the boundary.
 func TestTree_RolloverInvariantHoldsAcrossChildren(t *testing.T) {
 	root := &config.GroupConfig{
-		Name:   "org",
-		Weight: 1,
-		Budget: &config.TokenBudget{Tokens: 2000, Window: "50ms", SoftThrottleAt: 0.999},
+		Name:        "org",
+		Weight:      1,
+		Budget:      &config.TokenBudget{Tokens: 2000, Window: "50ms", SoftThrottleAt: 0.999},
 		ResetPolicy: &config.ResetPolicy{Mode: "hard"},
 		Children: []*config.GroupConfig{
 			{Name: "a", Weight: 1, Budget: &config.TokenBudget{Tokens: 1000, Window: "50ms", SoftThrottleAt: 0.999},

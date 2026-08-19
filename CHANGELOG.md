@@ -6,6 +6,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-20
+
+Correctness-fix iteration, fixes-only. Two medium-severity bugs found by
+re-grilling the shipped v0.12.0 source — both in the metering and tier
+enforcement paths, no new surface area. Each fix ships with Go regression
+tests (unit + integration) that fail on the unfixed code.
+
+### Fixed
+- **Anthropic prompt-cache input tokens are now metered, not dropped.**
+  `claudeUsage` (internal/providers/claude.go) only declared `input_tokens`
+  and `output_tokens`, so `json.Unmarshal` silently dropped the
+  `cache_creation_input_tokens` and `cache_read_input_tokens` fields that
+  Anthropic's `message_start` usage object carries separately. Prompt caching
+  is on by default for Claude Code (the plan's named primary audience), where
+  the cached prompt routinely runs 10-50x larger than `input_tokens`, so a
+  cached turn under-counted input by that factor and the org cap, per-leaf
+  budgets and the Opus tier sub-ceiling effectively never bit for cached
+  traffic; `tokenctl export` under-counted the same field on its finance
+  reconciliation — an undocumented metering gap vs the README's "token-by-token"
+  claim. `claudeUsage` now declares both cache fields and `advance()` advances
+  the input HWM against their sum with `input_tokens` so every billed input
+  token is attributed once (the HWM diff stays correct because `message_start`
+  reports all three once and `message_delta` reports output only). The two
+  snake_case fields are mirrored on `bedrockUsage` for Anthropic-on-Bedrock
+  (MEDIUM).
+- **Model-tier `soft_throttle_at` is now honoured, not silently dropped.**
+  The tier sub-ceiling's `soft_throttle_at` was validated at config load
+  (required in `(0,1]`, defaulted to `0.8`) but never reached the runtime:
+  `SetModelTiers` (internal/budget/tree.go) copied only `budget` and `windowD`
+  onto `tierState` and dropped `SoftThrottleAt`, and `Admit`'s tier branch only
+  hard-denied. There was no tier soft-throttle path, unlike the node path and
+  the wallet path which both honour `SoftThrottleAt`. An operator who set
+  `soft_throttle_at: 0.5` on an Opus tier had the value accepted, validated and
+  then discarded — sibling agents ran straight to the 100% hard cap with no
+  `Retry-After` the node/wallet paths would have emitted at 50%. `SetModelTiers`
+  now copies `SoftThrottleAt` onto `tierState`, and `Admit` runs a tier
+  soft-throttle check in the soft-throttle section (after all hard-denies, so
+  "hard wins over soft" holds) mirroring the node loop; a `softThrottleAt==0`
+  tier skips the check so it cannot always-throttle (MEDIUM).
+
 ## [0.12.0] - 2026-08-17
 
 Correctness-fix iteration, fixes-only. Two medium-severity bugs found by

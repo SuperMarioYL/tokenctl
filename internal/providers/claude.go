@@ -249,9 +249,20 @@ type claudeBufferedResponse struct {
 	Usage claudeUsage `json:"usage"`
 }
 
+// claudeUsage mirrors the Anthropic Messages usage object. message_start
+// reports input_tokens once alongside the cache_creation_input_tokens and
+// cache_read_input_tokens fields (the prompt-cache billable input surface);
+// message_delta reports output_tokens only (cumulative). The two cache fields
+// are decoded here so a cached Claude Code turn — where the cached prompt
+// routinely runs 10-50x larger than input_tokens — is attributed in full,
+// otherwise the leaf/node/wallet counters and the tier sub-ceiling under-count
+// input by that factor and the org cap effectively never bites for cached
+// traffic (fix-claude-meter-drops-cache-input-tokens).
 type claudeUsage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
 func (m *claudeMeter) Observe(event string, data []byte) (int64, int64) {
@@ -284,11 +295,19 @@ func (m *claudeMeter) Observe(event string, data []byte) (int64, int64) {
 // advance promotes the high-water marks and returns the deltas. Cumulative
 // counters that go backwards (rare upstream bug) are clamped to zero delta
 // rather than producing a negative attribution.
+//
+// The input HWM is advanced against the SUM of input_tokens +
+// cache_creation_input_tokens + cache_read_input_tokens so every billed input
+// token is attributed once. message_start reports all three once (the cache
+// fields are absent on message_delta), so the HWM diff stays correct: a
+// subsequent message_delta carrying only output_tokens sees the same input
+// HWM and emits a zero input delta (fix-claude-meter-drops-cache-input-tokens).
 func (m *claudeMeter) advance(u claudeUsage) (int64, int64) {
+	totalInput := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 	var in, out int64
-	if u.InputTokens > m.inputHWM {
-		in = u.InputTokens - m.inputHWM
-		m.inputHWM = u.InputTokens
+	if totalInput > m.inputHWM {
+		in = totalInput - m.inputHWM
+		m.inputHWM = totalInput
 	}
 	if u.OutputTokens > m.outputHWM {
 		out = u.OutputTokens - m.outputHWM

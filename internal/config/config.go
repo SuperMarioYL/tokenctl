@@ -37,17 +37,17 @@ const (
 
 // Config is the root of tokenctl.yaml.
 type Config struct {
-	Version     string           `yaml:"version"`
-	Listen      string           `yaml:"listen"`
-	TLS         TLSConfig        `yaml:"tls,omitempty"`
-	Store       StoreConfig      `yaml:"store"`
-	Metrics     MetricsConfig    `yaml:"metrics"`
-	Wallet      *WalletConfig    `yaml:"wallet,omitempty"`
-	Providers   []ProviderConfig `yaml:"providers"`
-	Tree        *GroupConfig     `yaml:"tree"`
-	APIKeys     []APIKeyBinding  `yaml:"api_keys"`
-	ModelTiers  []ModelTier      `yaml:"model_tiers,omitempty"`
-	Pricing     *PricingConfig   `yaml:"pricing,omitempty"`
+	Version    string           `yaml:"version"`
+	Listen     string           `yaml:"listen"`
+	TLS        TLSConfig        `yaml:"tls,omitempty"`
+	Store      StoreConfig      `yaml:"store"`
+	Metrics    MetricsConfig    `yaml:"metrics"`
+	Wallet     *WalletConfig    `yaml:"wallet,omitempty"`
+	Providers  []ProviderConfig `yaml:"providers"`
+	Tree       *GroupConfig     `yaml:"tree"`
+	APIKeys    []APIKeyBinding  `yaml:"api_keys"`
+	ModelTiers []ModelTier      `yaml:"model_tiers,omitempty"`
+	Pricing    *PricingConfig   `yaml:"pricing,omitempty"`
 
 	// path is the file the config was loaded from; used for relative store paths.
 	path string `yaml:"-"`
@@ -92,11 +92,11 @@ type ProviderConfig struct {
 // child consumption). Leaves are nodes with len(Children) == 0 and are the
 // only nodes an inbound API key may be bound to.
 type GroupConfig struct {
-	Name         string         `yaml:"name"`
-	Weight       int            `yaml:"weight"`
-	Budget       *TokenBudget   `yaml:"budget,omitempty"`
-	ResetPolicy  *ResetPolicy   `yaml:"reset_policy,omitempty"`
-	Children     []*GroupConfig `yaml:"children,omitempty"`
+	Name        string         `yaml:"name"`
+	Weight      int            `yaml:"weight"`
+	Budget      *TokenBudget   `yaml:"budget,omitempty"`
+	ResetPolicy *ResetPolicy   `yaml:"reset_policy,omitempty"`
+	Children    []*GroupConfig `yaml:"children,omitempty"`
 }
 
 // TokenBudget is a per-window token ceiling with a soft-throttle threshold.
@@ -131,9 +131,9 @@ type APIKeyBinding struct {
 // hard-capped independently of the team's flat token budget so it cannot
 // invisibly consume a whole window's headroom.
 type ModelTier struct {
-	Name                 string        `yaml:"name"`
-	Pattern              string        `yaml:"pattern"`
-	CostMultiplier       float64       `yaml:"cost_multiplier,omitempty"`
+	Name                  string       `yaml:"name"`
+	Pattern               string       `yaml:"pattern"`
+	CostMultiplier        float64      `yaml:"cost_multiplier,omitempty"`
 	BudgetTokensPerWindow *TokenBudget `yaml:"budget_tokens_per_window,omitempty"`
 }
 
@@ -150,8 +150,8 @@ type ModelTier struct {
 //     for X minutes past rollover before flipping.
 type ResetPolicy struct {
 	Mode           string  `yaml:"mode"`
-	RolloverCapPct  float64 `yaml:"rollover_cap_pct,omitempty"`
-	GracePeriod     string  `yaml:"grace_period,omitempty"`
+	RolloverCapPct float64 `yaml:"rollover_cap_pct,omitempty"`
+	GracePeriod    string  `yaml:"grace_period,omitempty"`
 }
 
 // UnmarshalYAML accepts reset_policy as either a bare scalar (e.g.
@@ -181,9 +181,9 @@ type PricingConfig struct {
 // against the request `model` field (first match wins). Prices are per one
 // million tokens.
 type ModelPrice struct {
-	Pattern           string  `yaml:"pattern"`
-	InputPerMillion   float64 `yaml:"input_per_million"`
-	OutputPerMillion  float64 `yaml:"output_per_million"`
+	Pattern          string  `yaml:"pattern"`
+	InputPerMillion  float64 `yaml:"input_per_million"`
+	OutputPerMillion float64 `yaml:"output_per_million"`
 }
 
 // Path returns the file the config was loaded from, or empty if constructed

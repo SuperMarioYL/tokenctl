@@ -106,3 +106,60 @@ func TestPeekJSONModelFieldFailSoftOnEmptyBody(t *testing.T) {
 		t.Fatalf("empty body model = %q, want empty (fail-soft)", got)
 	}
 }
+
+// TestClaudeMeterAttributesCacheInputTokens is the unit-level regression for
+// fix-claude-meter-drops-cache-input-tokens. Anthropic's message_start usage
+// carries cache_creation_input_tokens + cache_read_input_tokens as SEPARATE
+// fields from input_tokens (the prompt-cache billable input surface). The
+// meter must sum all three into the input delta so a cached Claude Code turn —
+// where the cached prompt routinely runs 10-50x larger than input_tokens — is
+// attributed in full. On the unfixed code the two cache fields were dropped by
+// json.Unmarshal (undeclared on claudeUsage), so input was under-counted by
+// the cache magnitude.
+func TestClaudeMeterAttributesCacheInputTokens(t *testing.T) {
+	c := &ClaudeProvider{upstream: &url.URL{Scheme: "https", Host: "api.anthropic.com"}}
+	m := c.NewMeter()
+
+	// message_start: input_tokens=100 + cache_creation=5000 + cache_read=3000
+	// (total billed input = 8100), output_tokens=0. The input delta must be
+	// the full 8100, not just 100.
+	start := []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"cache_creation_input_tokens":5000,"cache_read_input_tokens":3000,"output_tokens":0}}}`)
+	inDelta, outDelta := m.Observe("message_start", start)
+	if inDelta != 8100 {
+		t.Fatalf("message_start input delta = %d, want 8100 (input 100 + cache_creation 5000 + cache_read 3000 — cache fields must be summed, not dropped)", inDelta)
+	}
+	if outDelta != 0 {
+		t.Fatalf("message_start output delta = %d, want 0", outDelta)
+	}
+
+	// message_delta reports output only (cumulative); the input HWM is
+	// unchanged so the input delta must be 0 — the cache fields reported once
+	// on message_start must NOT be re-attributed.
+	delta := []byte(`{"type":"message_delta","usage":{"output_tokens":50}}`)
+	inDelta, outDelta = m.Observe("message_delta", delta)
+	if inDelta != 0 {
+		t.Fatalf("message_delta input delta = %d, want 0 (input HWM unchanged; cache tokens attributed once on message_start)", inDelta)
+	}
+	if outDelta != 50 {
+		t.Fatalf("message_delta output delta = %d, want 50", outDelta)
+	}
+}
+
+// TestBedrockMeterAttributesCacheInputTokens mirrors the claude regression for
+// Anthropic-on-Bedrock: the snake_case cache fields are additive to
+// input_tokens and must be summed into the input attribution.
+func TestBedrockMeterAttributesCacheInputTokens(t *testing.T) {
+	b := &BedrockProvider{upstream: &url.URL{Scheme: "https", Host: "bedrock-runtime.us-east-1.amazonaws.com"}, region: "us-east-1"}
+	m := b.NewMeter()
+
+	// Converse metadata event with Anthropic-on-Bedrock snake_case usage:
+	// input_tokens=100 + cache_creation=5000 + cache_read=3000 = 8100 input.
+	data := []byte(`{"usage":{"input_tokens":100,"cache_creation_input_tokens":5000,"cache_read_input_tokens":3000,"output_tokens":50}}`)
+	inDelta, outDelta := m.Observe("metadata", data)
+	if inDelta != 8100 {
+		t.Fatalf("input delta = %d, want 8100 (input 100 + cache_creation 5000 + cache_read 3000)", inDelta)
+	}
+	if outDelta != 50 {
+		t.Fatalf("output delta = %d, want 50", outDelta)
+	}
+}

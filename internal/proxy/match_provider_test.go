@@ -41,10 +41,10 @@ func TestMatchProviderClaudeCompleteDoesNotClaimOpenAICompletions(t *testing.T) 
 	}
 
 	for _, tc := range []struct {
-		name string
+		name   string
 		method string
-		path  string
-		want  string
+		path   string
+		want   string
 	}{
 		// The headline assertion: /v1/completions must reach the OpenAI
 		// provider, not be claimed by Claude's /v1/complete prefix.

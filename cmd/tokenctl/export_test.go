@@ -197,8 +197,8 @@ func TestExport_CSVAndJSONFormatters(t *testing.T) {
 		t.Fatalf("writeExportJSON: %v", err)
 	}
 	var doc struct {
-		Window string        `json:"window"`
-		Rows   []audit.Row   `json:"rows"`
+		Window string      `json:"window"`
+		Rows   []audit.Row `json:"rows"`
 	}
 	if err := json.NewDecoder(&buf).Decode(&doc); err != nil {
 		t.Fatalf("decode JSON: %v", err)

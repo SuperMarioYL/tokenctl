@@ -238,6 +238,123 @@ func TestTree_TierCapWithConcurrentReservation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// fix-tier-soft-throttle-at-silently-ignored
+// ---------------------------------------------------------------------------
+
+// TestTree_TierSoftThrottleHonoured is the regression for
+// fix-tier-soft-throttle-at-silently-ignored. soft_throttle_at on a tier's
+// budget_tokens_per_window was validated + defaulted (0.8) at config load but
+// SetModelTiers dropped it and Admit's tier branch only hard-denied — so an
+// operator who set soft_throttle_at: 0.5 on an Opus tier had it accepted,
+// validated and discarded; sibling agents ran straight to the 100% hard cap
+// with no Retry-After the node + wallet paths would have emitted at 50%. The
+// tier must now soft-throttle at its configured fraction, mirroring the node
+// loop (tree.go's node soft-throttle path). Fails on the unfixed code, which
+// would admit at 50%/75% and only ErrTierDenied at 100%.
+func TestTree_TierSoftThrottleHonoured(t *testing.T) {
+	cases := []struct {
+		name       string
+		preConsume int64
+		wantErr    error
+		wantErrIs  bool // whether wantErr is meaningful
+	}{
+		{name: "under_threshold_49pct", preConsume: 499, wantErr: nil, wantErrIs: false},
+		{name: "exactly_at_threshold_50pct", preConsume: 500, wantErr: ErrThrottled, wantErrIs: true},
+		{name: "above_threshold_75pct", preConsume: 750, wantErr: ErrThrottled, wantErrIs: true},
+		// At the 100% ceiling the tier hard-deny must still win over
+		// soft-throttle (hard wins over soft), surfacing ErrTierDenied.
+		{name: "at_ceiling_hard_deny_wins", preConsume: 1000, wantErr: ErrTierDenied, wantErrIs: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// mult=1 keeps the math transparent: raw tokens == attributed
+			// tokens, so preConsume maps directly to the tier fraction.
+			tiers := []config.ModelTier{
+				{
+					Name:           "opus",
+					Pattern:        "claude-opus.*",
+					CostMultiplier: 1,
+					BudgetTokensPerWindow: &config.TokenBudget{
+						Tokens: 1000, Window: "1h", SoftThrottleAt: 0.5,
+					},
+				},
+			}
+			tr := tierTree(t, tiers)
+
+			// Pre-consume on a throwaway admission so the next Admit sees the
+			// expected fraction. The parent node is at 1_000_000 tokens so the
+			// node never throttles/denies — the tier is the sole binding
+			// constraint.
+			if tc.preConsume > 0 {
+				adm, err := tr.Admit("k", "claude", "claude-opus-4-20250514")
+				if err != nil {
+					t.Fatalf("setup Admit: %v", err)
+				}
+				adm.AddInput(tc.preConsume)
+				adm.Release()
+			}
+
+			before := tr.throttlesTotal.Load()
+			adm, err := tr.Admit("k", "claude", "claude-opus-4-20250514")
+			if tc.wantErrIs {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Admit err = %v, want %v (tier soft_throttle_at=0.5 must throttle at 50%% before the 100%% hard cap; hard-deny must still win at the ceiling)", err, tc.wantErr)
+				}
+				if adm != nil {
+					t.Fatal("expected nil admission on tier throttle/deny")
+				}
+				// A throttled admit must bump the tree throttle counter so
+				// the operator-facing metric surfaces the tier soft-throttle.
+				if errors.Is(err, ErrThrottled) && tr.throttlesTotal.Load() != before+1 {
+					t.Fatalf("throttlesTotal = %d, want %d (tier soft-throttle must bump the tree throttle counter)", tr.throttlesTotal.Load(), before+1)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Admit err = %v, want nil (under the 50%% tier soft-throttle threshold)", err)
+				}
+				if adm == nil {
+					t.Fatal("expected non-nil admission")
+				}
+				adm.Release()
+			}
+		})
+	}
+}
+
+// TestTree_TierSoftThrottleDefaultZeroSkips mirrors the softThrottleAt==0 guard:
+// a tier whose budget omits soft_throttle_at (and is constructed without the
+// 0.8 config default) must NOT always-throttle at frac>=0 — it falls through
+// to hard-deny only, so the unfixed footgun (always-throttle) cannot regress.
+func TestTree_TierSoftThrottleDefaultZeroSkips(t *testing.T) {
+	tiers := []config.ModelTier{
+		{
+			Name:           "opus",
+			Pattern:        "claude-opus.*",
+			CostMultiplier: 1,
+			BudgetTokensPerWindow: &config.TokenBudget{
+				Tokens: 1000, Window: "1h", SoftThrottleAt: 0, // unset: no soft-throttle
+			},
+		},
+	}
+	tr := tierTree(t, tiers)
+
+	// Pre-consume 500 (50%): with softThrottleAt==0 the soft-throttle path is
+	// skipped, so the admit must succeed (hard-deny only at 100%).
+	adm, err := tr.Admit("k", "claude", "claude-opus-4-20250514")
+	if err != nil {
+		t.Fatalf("setup Admit: %v", err)
+	}
+	adm.AddInput(500)
+	adm.Release()
+
+	adm2, err := tr.Admit("k", "claude", "claude-opus-4-20250514")
+	if err != nil {
+		t.Fatalf("Admit at 50%% with softThrottleAt=0 err = %v, want nil (unset soft_throttle_at must not always-throttle)", err)
+	}
+	adm2.Release()
+}
+
+// ---------------------------------------------------------------------------
 // fix-tier-counter-not-persisted-across-restart
 // ---------------------------------------------------------------------------
 

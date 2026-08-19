@@ -33,9 +33,9 @@ import (
 
 // Version is the binary's release tag. Overridable at link time:
 //
-//	go build -ldflags "-X main.Version=v0.12.0 -X main.Commit=$(git rev-parse --short HEAD)"
+//	go build -ldflags "-X main.Version=v0.13.0 -X main.Commit=$(git rev-parse --short HEAD)"
 var (
-	Version = "v0.12.0"
+	Version = "v0.13.0"
 	Commit  = "unknown"
 )
 

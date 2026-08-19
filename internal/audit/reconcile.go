@@ -29,8 +29,8 @@ type ReconcileStore interface {
 // PriceSpec is one uncompiled row of the pricing table (per-1M-tokens).
 type PriceSpec struct {
 	Pattern          string
-	InputPerMillion   float64
-	OutputPerMillion  float64
+	InputPerMillion  float64
+	OutputPerMillion float64
 }
 
 // Price is a compiled pricing-table row. Pattern matches the request `model`
@@ -38,8 +38,8 @@ type PriceSpec struct {
 type Price struct {
 	Pattern          string
 	re               *regexp.Regexp
-	InputPerMillion   float64
-	OutputPerMillion  float64
+	InputPerMillion  float64
+	OutputPerMillion float64
 }
 
 // CompilePrices compiles price specs into matchable Prices. Returns an error
@@ -54,8 +54,8 @@ func CompilePrices(specs []PriceSpec) ([]Price, error) {
 		out = append(out, Price{
 			Pattern:          s.Pattern,
 			re:               re,
-			InputPerMillion:   s.InputPerMillion,
-			OutputPerMillion:  s.OutputPerMillion,
+			InputPerMillion:  s.InputPerMillion,
+			OutputPerMillion: s.OutputPerMillion,
 		})
 	}
 	return out, nil
@@ -65,12 +65,12 @@ func CompilePrices(specs []PriceSpec) ([]Price, error) {
 // (team, provider, model_tier) triple, with input/output token sums and a
 // cost_estimate joined from the pricing table.
 type Row struct {
-	Team          string  `json:"team"`
-	Provider      string  `json:"provider"`
-	ModelTier     string  `json:"model_tier"`
-	InputTokens   int64   `json:"input_tokens"`
-	OutputTokens  int64   `json:"output_tokens"`
-	CostEstimate  float64 `json:"cost_estimate"`
+	Team         string  `json:"team"`
+	Provider     string  `json:"provider"`
+	ModelTier    string  `json:"model_tier"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostEstimate float64 `json:"cost_estimate"`
 }
 
 // Reconcile aggregates the window's spend from the audit log's release events

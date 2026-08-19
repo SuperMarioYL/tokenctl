@@ -132,12 +132,12 @@ type Tree struct {
 	// in-flight estimate, keyed by tier name. Populated by SetModelTiers.
 	// Each tier with a budget_tokens_per_window sub-ceiling is hard-enforced
 	// independently of the node's flat token budget (feat_model_tier_override).
-	tiers        []*tierState
-	tierByName   map[string]*tierState
-	inFlightCount     int64
-	deniesTotal       atomic.Int64
-	throttlesTotal    atomic.Int64
-	preemptsTotal     atomic.Int64
+	tiers          []*tierState
+	tierByName     map[string]*tierState
+	inFlightCount  int64
+	deniesTotal    atomic.Int64
+	throttlesTotal atomic.Int64
+	preemptsTotal  atomic.Int64
 	// auditWriteFailures counts audit events lost to AppendAudit errors. The
 	// store's AppendAudit is a synchronous bbolt write tx that can fail on
 	// disk-full, a transient bbolt error, or a closed DB; without this counter
@@ -149,13 +149,13 @@ type Tree struct {
 
 	arb *arbiter
 
-	descConsumed *prometheus.Desc
-	descBudget   *prometheus.Desc
-	descInFlight *prometheus.Desc
-	descWallet   *prometheus.Desc
-	descDenies   *prometheus.Desc
-	descThrottle *prometheus.Desc
-	descPreempts *prometheus.Desc
+	descConsumed      *prometheus.Desc
+	descBudget        *prometheus.Desc
+	descInFlight      *prometheus.Desc
+	descWallet        *prometheus.Desc
+	descDenies        *prometheus.Desc
+	descThrottle      *prometheus.Desc
+	descPreempts      *prometheus.Desc
 	descAuditFailures *prometheus.Desc
 }
 
@@ -250,12 +250,21 @@ type tierState struct {
 	costMult float64
 	budget   int64 // 0 = no per-tier sub-ceiling
 	windowD  time.Duration
+	// softThrottleAt is the tier's configured soft-throttle fraction (defaults
+	// to 0.8 at config load). SetModelTiers copies it from
+	// BudgetTokensPerWindow.SoftThrottleAt so Admit's tier soft-throttle path
+	// can honour it — without this copy the value was validated + defaulted
+	// at config load and then silently dropped (fix-tier-soft-throttle-at-
+	// silently-ignored). 0 means "no soft-throttle on this tier" (hard-deny
+	// only), guarding against a tier constructed without the default.
+	softThrottleAt float64
 
 	mu          sync.Mutex
 	consumed    int64
 	reserved    int64
 	windowStart time.Time
 	denies      int64
+	throttles   int64
 }
 
 // tierCounterKey is the stable store key for a model-tier's windowed counter.
@@ -290,6 +299,12 @@ func (ts *tierState) effectiveLoad(now time.Time) (int64, time.Time) {
 func (ts *tierState) bumpDenies() {
 	ts.mu.Lock()
 	ts.denies++
+	ts.mu.Unlock()
+}
+
+func (ts *tierState) bumpThrottles() {
+	ts.mu.Lock()
+	ts.throttles++
 	ts.mu.Unlock()
 }
 
@@ -425,9 +440,9 @@ func (t *Tree) SetModelTiers(tiers []config.ModelTier) error {
 			mult = 1.0
 		}
 		ts := &tierState{
-			name:     mt.Name,
-			re:       re,
-			costMult: mult,
+			name:        mt.Name,
+			re:          re,
+			costMult:    mult,
 			windowStart: now,
 		}
 		if mt.BudgetTokensPerWindow != nil {
@@ -437,6 +452,12 @@ func (t *Tree) SetModelTiers(tiers []config.ModelTier) error {
 			}
 			ts.budget = mt.BudgetTokensPerWindow.Tokens
 			ts.windowD = d
+			// Copy SoftThrottleAt so Admit's tier soft-throttle path can honour
+			// it. Without this the value was validated + defaulted at config
+			// load and then silently dropped here — an operator who set
+			// soft_throttle_at: 0.5 on an Opus tier had it accepted, validated
+			// and discarded (fix-tier-soft-throttle-at-silently-ignored).
+			ts.softThrottleAt = mt.BudgetTokensPerWindow.SoftThrottleAt
 		}
 		// Restore the per-tier windowed counter from the store so a crash /
 		// SIGKILL / OOM / deployment mid-window no longer zeroes the tier hard
@@ -619,11 +640,14 @@ func (t *Tree) flushAll() {
 // model is the parsed request `model` field (e.g. "claude-opus-4-..."). When
 // the config declares a model_tiers block, Admit resolves the request's tier
 // and (a) applies the tier's cost_multiplier to attributed tokens so an
-// Opus-class session consumes budget proportionate to its cost, and (b)
-// hard-denies at X-TokenCtl-Reason: budget_exceeded_tier when the tier's own
-// sub-ceiling is crossed — independently of the leaf's parent budget
-// (feat_model_tier_override). Pass "" when no model is available; no tier
-// applies and behaviour is identical to the pre-v0.9.0 flat-budget path.
+// Opus-class session consumes budget proportionate to its cost, (b) hard-denies
+// at X-TokenCtl-Reason: budget_exceeded_tier when the tier's own sub-ceiling is
+// crossed — independently of the leaf's parent budget, and (c) soft-throttles
+// at the tier's soft_throttle_at fraction, mirroring the node + wallet paths so
+// an operator-set tier throttle actually surfaces a Retry-After instead of
+// being silently dropped (feat_model_tier_override). Pass "" when no model is
+// available; no tier applies and behaviour is identical to the pre-v0.9.0
+// flat-budget path.
 func (t *Tree) Admit(apiKey, provider, model string) (proxy.Admission, error) {
 	leaf, ok := t.leafByKey[apiKey]
 	if !ok {
@@ -689,6 +713,25 @@ func (t *Tree) Admit(apiKey, provider, model string) (proxy.Admission, error) {
 			t.deniesTotal.Add(1)
 			t.appendAudit(AuditEvent{At: now, Kind: "deny", Reason: "wallet_exceeded", Provider: provider, Model: model})
 			return nil, ErrDenied
+		}
+	}
+
+	// Soft-throttle pre-checks: hard-deny has already run across the tier +
+	// node chain + wallet above, so "hard wins over soft" holds. The tier
+	// soft-throttle mirrors the node loop: an operator who sets
+	// soft_throttle_at: 0.5 on an Opus tier gets a Retry-After throttle at 50%
+	// instead of sibling agents running straight to the 100% hard cap with no
+	// signal — the same asymmetry the node + wallet paths already close
+	// (fix-tier-soft-throttle-at-silently-ignored). softThrottleAt==0 (a tier
+	// constructed without the 0.8 default) skips the check so it cannot
+	// always-throttle at frac>=0.
+	if tier != nil && tier.budget > 0 && tier.softThrottleAt > 0 {
+		tl, _ := tier.effectiveLoad(now)
+		if frac(tl, tier.budget) >= tier.softThrottleAt {
+			tier.bumpThrottles()
+			t.throttlesTotal.Add(1)
+			t.appendAudit(AuditEvent{At: now, Kind: "throttle", Reason: "soft_throttle_tier", Group: leaf.path, Provider: provider, Model: model})
+			return nil, ErrThrottled
 		}
 	}
 
