@@ -187,11 +187,22 @@ type bedrockUsage struct {
 	PromptTokenCount     int64 `json:"prompt_token_count"`
 	GenerationTokenCount int64 `json:"generation_token_count"`
 	// cache_creation_input_tokens / cache_read_input_tokens are present on
-	// Anthropic-on-Bedrock usage blocks (the prompt-cache billable input
-	// surface). They are ADDITIVE to input_tokens, so the meter sums them
-	// rather than pickMax-ing them (fix-claude-meter-drops-cache-input-tokens).
+	// Anthropic-on-Bedrock INVOKE usage blocks (the prompt-cache billable
+	// input surface). They are ADDITIVE to input_tokens, so the meter sums
+	// them rather than pickMax-ing them (fix-claude-meter-drops-cache-input-tokens).
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	// The Bedrock Converse API reports the same prompt-cache billable input
+	// as camelCase cacheReadInputTokens / cacheWriteInputTokens, with
+	// inputTokens being the NON-cached input and cache reported additively.
+	// Without these tags the camelCase fields deserialize to zero and are
+	// dropped from the input sum, so a cached Converse turn silently
+	// under-counts and bypasses the budget cap (fail-open)
+	// (fix-bedrock-converse-cache-input-tokens-dropped). A response carries
+	// only one shape — Converse camelCase OR INVOKE snake_case — so only one
+	// set is non-zero and summing all four does not double-count.
+	CacheReadInputTokensCamel  int64 `json:"cacheReadInputTokens"`
+	CacheWriteInputTokensCamel int64 `json:"cacheWriteInputTokens"`
 }
 
 // Multiple top-level shapes — we union them into one struct via a single
@@ -224,8 +235,10 @@ func (m *bedrockMeter) Observe(event string, data []byte) (int64, int64) {
 		// Anthropic-on-Bedrock reports the prompt-cache billable input as
 		// separate cache fields; they are additive to input_tokens, so a
 		// cached turn attributes its full input cost (mirroring the claude
-		// provider). Absent (zero) on non-Anthropic Bedrock shapes.
-		in += env.Usage.CacheCreationInputTokens + env.Usage.CacheReadInputTokens
+		// provider). Both shapes are summed: snake_case for the INVOKE family
+		// and camelCase for the Converse family. Absent (zero) on non-Anthropic
+		// Bedrock shapes, and only one shape is non-zero per response.
+		in += env.Usage.CacheCreationInputTokens + env.Usage.CacheReadInputTokens + env.Usage.CacheWriteInputTokensCamel + env.Usage.CacheReadInputTokensCamel
 		out = pickMax(env.Usage.OutputTokens, env.Usage.OutputTokensSnake, env.Usage.GenerationTokenCount)
 	}
 	if env.PromptTokenCount > in {

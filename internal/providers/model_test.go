@@ -163,3 +163,30 @@ func TestBedrockMeterAttributesCacheInputTokens(t *testing.T) {
 		t.Fatalf("output delta = %d, want 50", outDelta)
 	}
 }
+
+// TestBedrockMeterAttributesConverseCacheInputTokens is the regression for
+// fix-bedrock-converse-cache-input-tokens-dropped. The Bedrock Converse API
+// reports the prompt-cache billable input as camelCase
+// cacheReadInputTokens / cacheWriteInputTokens (NOT the snake_case shape the
+// INVOKE family uses), with inputTokens being the NON-cached input and the
+// cache fields additive. On the unfixed code the camelCase fields had no
+// matching struct tag, deserialized to zero, and were dropped from the input
+// sum, so a cached Converse turn silently under-counted its input and
+// bypassed the budget cap (fail-open). Here inputTokens=100 is only the
+// non-cached input; the full billed input is 100+3000+5000=8100.
+func TestBedrockMeterAttributesConverseCacheInputTokens(t *testing.T) {
+	b := &BedrockProvider{upstream: &url.URL{Scheme: "https", Host: "bedrock-runtime.us-east-1.amazonaws.com"}, region: "us-east-1"}
+	m := b.NewMeter()
+
+	// Non-streamed Converse response: inputTokens=100 (non-cached) +
+	// cacheReadInputTokens=3000 + cacheWriteInputTokens=5000 = 8100 input,
+	// outputTokens=50. The empty event is the non-streamed Converse path.
+	data := []byte(`{"usage":{"inputTokens":100,"cacheReadInputTokens":3000,"cacheWriteInputTokens":5000,"outputTokens":50,"totalTokens":8150}}`)
+	inDelta, outDelta := m.Observe("", data)
+	if inDelta != 8100 {
+		t.Fatalf("input delta = %d, want 8100 (inputTokens 100 + cacheRead 3000 + cacheWrite 5000 — camelCase cache fields must be summed, not dropped)", inDelta)
+	}
+	if outDelta != 50 {
+		t.Fatalf("output delta = %d, want 50", outDelta)
+	}
+}
