@@ -3,6 +3,7 @@
   "name": "tokenctl",
   "github": "https://github.com/SuperMarioYL/tokenctl",
   "host": "tokenctl.lei6393.com",
+  "meta": { "content_version": "0.15.0" },
   "lang": { "primary": "zh", "toggle": true },
   "accent": ["#14b8a6", "#0d9488", "#0f766e"],
   "hero": {
