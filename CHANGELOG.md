@@ -6,6 +6,62 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-02
+
+Release-provenance hardening, fixes-only. The v0.14.0 tag shipped the Bedrock
+Converse cache-token attribution fix but left every release-provenance surface
+stale at the prior version; this release repairs the drift so `tokenctl --version`
+reflects the shipped fix across every build path, not only the goreleaser archives.
+
+### Fixed
+- **Release provenance no longer reports v0.13.0 on the v0.14.0+ tag.**
+  The v0.14.0 git tag (HEAD a4148cf) shipped the Bedrock Converse cache fix but
+  the VERSION file, the `main.Version` var (and its ldflags comment), the
+  `version_flag_test.go` lockstep guard, the CHANGELOG (no `[0.14.0]` entry — the
+  Bedrock fix was undocumented in-repo), and `web/site.json` (no `content_version`)
+  all stayed at v0.13.0. goreleaser injects `-X main.Version={{.Version}}` from the
+  git tag for RELEASED archives, so the published v0.14.0 binaries reported v0.14.0,
+  but every other build path — `go build ./cmd/tokenctl`, `go install`, the CI
+  workflow's `go build ./...`, and the demo workflow's `go build` (no ldflags) —
+  produced a binary reporting v0.13.0 on the v0.14.0 tag, so release-pinning scripts
+  greping `tokenctl --version` could not distinguish the fixed release from the
+  pre-fix v0.13.0 release, and the demo gif was rendered by a misversioned binary.
+  The `version_flag_test.go` lockstep guard asserted v0.13.0 and passed on the
+  v0.14.0 tag only because the var it guards was itself stale — the drift-catcher was
+  neutralised. Fix: bump VERSION, `main.Version` + the ldflags comment, and the
+  `version_flag_test.go` assertions to v0.15.0; backfill the missing `[0.14.0]`
+  CHANGELOG entry and add this `[0.15.0]` entry; add `web/site.json`
+  `meta.content_version = "0.15.0"`. The Bedrock Converse cache metering was
+  re-verified correct against the AWS Bedrock Converse API and is unchanged (MEDIUM).
+
+## [0.14.0] - 2026-08-24
+
+Correctness-fix iteration, fixes-only. One medium-severity bug found by re-grilling
+the shipped v0.13.0 source — in the Bedrock metering path, no new surface area.
+Ships with a Go regression test that fails on the unfixed code.
+
+### Fixed
+- **Bedrock Converse cache tokens are now attributed, not dropped.**
+  `bedrockUsage` (internal/providers/bedrock.go) tagged the prompt-cache billable
+  input fields only snake_case (`cache_creation_input_tokens`,
+  `cache_read_input_tokens`), matching the Anthropic-on-Bedrock INVOKE shape. The
+  Bedrock Converse API — the provider's strategic target, served at
+  `/model/.../converse` and `converse-stream` — reports cache usage as camelCase
+  `cacheReadInputTokens` / `cacheWriteInputTokens`, with `inputTokens` being the
+  NON-cached input and the cache fields additive (verified against the AWS Bedrock
+  Converse API: `totalTokens = inputTokens + outputTokens` and does NOT include the
+  cache fields). For a cached Converse response the camelCase cache fields had no
+  matching struct tag, silently deserialized to zero, and were dropped from the
+  input attribution — the meter credited only `inputTokens`, so a cached Claude
+  Code-style turn on Bedrock Converse (cached prompt routinely 10-50x `inputTokens`)
+  was under-counted by that factor and the leaf/node/wallet/tier caps never bit for
+  that traffic: a silent fail-open on the budget cap the product exists to enforce.
+  `bedrockUsage` now declares `CacheReadInputTokensCamel`
+  (`json:"cacheReadInputTokens"`) and `CacheWriteInputTokensCamel`
+  (`json:"cacheWriteInputTokens"`) and includes them additively in the input sum. A
+  given response carries only one shape (Converse camelCase OR INVOKE snake_case), so
+  only one set is non-zero — no double-count (MEDIUM).
+
 ## [0.13.0] - 2026-08-20
 
 Correctness-fix iteration, fixes-only. Two medium-severity bugs found by
