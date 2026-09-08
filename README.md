@@ -1,177 +1,116 @@
-[English](./README.en.md) | **简体中文**
+[English](README.en.md) | **简体中文**
 
-<p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:8b5cf6,100:14b8a6&height=180&section=header&text=tokenctl&fontSize=64&fontColor=ffffff&desc=cgroups%20for%20LLM%20tokens&descSize=18&descAlignY=68" alt="tokenctl banner" />
-</p>
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/hero-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/hero-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/hero-dark.svg">
+  <img src="assets/presentation/hero-light.svg" width="1000" alt="为组织、团队和开发者配置 token 预算，通过反向代理归账、控制准入并提供运行指标。">
+</picture>
 
-<p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="license"/></a>
-  <a href="https://github.com/SuperMarioYL/tokenctl/releases"><img src="https://img.shields.io/github/v/release/SuperMarioYL/tokenctl?style=flat-square&color=8b5cf6" alt="release"/></a>
-  <img src="https://img.shields.io/github/actions/workflow/status/SuperMarioYL/tokenctl/ci.yml?style=flat-square" alt="ci"/>
-  <img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white&style=flat-square" alt="go"/>
-  <img src="https://img.shields.io/badge/Claude%20Code-ready-8b5cf6?style=flat-square" alt="Claude Code"/>
-  <img src="https://img.shields.io/badge/Agent-governable-14b8a6?style=flat-square" alt="Agent"/>
-</p>
+**为组织、团队和开发者配置 token 预算，通过反向代理归账、控制准入并提供运行指标。**
 
-> **tokenctl 是面向平台工程团队的 cgroups 式 Agent 预算控制器，负责为 Claude Code 流量分配权重并执行抢占。**
->
-> 一份 YAML 描述 `org → team → dev` 的预算树；一个二进制反代 Claude / OpenAI / Bedrock；流式 token 实时归账，越线软节流，超额硬拒绝（429 + `X-TokenCtl-Reason`），抢占式让权给高权重兄弟节点。
+`v0.15.0` · `Go 1.24+` · [Apache-2.0](LICENSE)
 
-## 目录
+[Website](https://tokenctl.lei6393.com) · [Demo record](docs/demo-results.json)
 
-- [为什么需要它](#为什么需要它)
-- [架构概览](#架构概览)
-- [快速上手（10 分钟）](#快速上手10-分钟)
-- [演示](#演示)
-- [配置说明](#配置说明)
-- [对比 chrome-devtools-mcp](#对比-chrome-devtools-mcp)
-- [付费 / Pricing](#付费--pricing)
-- [路线图](#路线图)
-- [开源协议与贡献](#开源协议与贡献)
-- [分享一下](#分享一下)
+## 为什么使用
 
-## 为什么需要它
+多位开发者共享模型额度时，需要知道请求归属以及什么时候应拒绝新请求。tokenctl 把入站 key 绑定到预算树叶子，将用量累计到父级，并支持共享钱包与模型层级限制。额度单位与费用估算分开配置。
 
-平台 / DevEx 团队正在面临同一个问题：CFO 把全公司的 **Claude Code** 账单交给一个人管，而 Helicone、Portkey、LangSmith 这些工具只在事后给你一张账单——它们「看见」却不「管住」。
+## 架构
 
-ChromeDevTools 团队最近开源了 [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp)，让 Agent 直接驱动浏览器：调试器更强了，token 烧得也更快了。HKUDS 这类组织也在发布越来越多面向生产的 Agent 框架。当 **Agent** 成为团队里事实上的「无监督新员工」时，再没有 OS 级别的资源仲裁器就是失职——这就是 tokenctl 存在的理由：**一个工程团队真正能装上的 AI 预算控制器**。
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/architecture-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/architecture-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/architecture-dark.svg">
+  <img src="assets/presentation/architecture-light.svg" width="1000" alt="配置加载器构建树，budget 给请求分配带预留额度的 Admission，proxy 转发并解析支持协议里的用量。AddInput/AddOutput 归账后，BoltDB 保存计数和审计事件；Prometheus、top 与 export 展示运行状态。抢占取消 admission 上下文，由代理处理上游中断。">
+</picture>
 
-> 灵感来源：Simon Willison 的「每月 \$1,500 Claude Code 预算」周记。我们写了那篇文章描述的「执行层」。
+配置加载器构建树，budget 给请求分配带预留额度的 Admission，proxy 转发并解析支持协议里的用量。AddInput/AddOutput 归账后，BoltDB 保存计数和审计事件；Prometheus、top 与 export 展示运行状态。抢占取消 admission 上下文，由代理处理上游中断。
 
-## <img src="https://api.iconify.design/tabler/topology-star-3.svg?color=%235e5ce6" width="20" height="20" align="center" /> 架构概览
+源码入口：[cmd/tokenctl/main.go](cmd/tokenctl/main.go) · [cmd/tokenctl/export.go](cmd/tokenctl/export.go) · [internal/config/config.go](internal/config/config.go) · [internal/budget/tree.go](internal/budget/tree.go) · [internal/budget/preempt.go](internal/budget/preempt.go) · [internal/proxy/proxy.go](internal/proxy/proxy.go) · [internal/store/state.go](internal/store/state.go) · [configs/tokenctl.example.yaml](configs/tokenctl.example.yaml)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
-    <img src="./assets/atlas-light.svg" width="880" alt="Coding Agent 流量进入一个 Go 二进制——proxy 反代请求并逐 token 计量 SSE 流，budget 树按 org→team→dev 配额准入、软节流、硬拒绝并抢占，再转发给 Claude/OpenAI/Bedrock；BoltDB 持久化计数与审计日志，Prometheus 与 tokenctl top 暴露实时状态">
-  </picture>
-</p>
+## 安装
 
-每个 Coding Agent 请求都打到同一个静态 Go 二进制上。`internal/proxy` 反代请求并逐 token 计量流式 SSE 响应；`internal/budget` 跑 `org → team → dev` 仲裁器，负责准入、超过 80% 软节流、超过 100% 硬拒绝（`429 + X-TokenCtl-Reason`），并在高权重兄弟节点缺粮时抢占在飞的低权重请求。计量增量回流到每个 leaf，`internal/store` 用 BoltDB 持久化窗口内计数与 append-only 审计日志，Prometheus `/metrics` 与 `tokenctl top` 暴露实时消耗。
-
-整个 v0.1 是一个二进制、三个内部模块：
-
-| 模块 | 职责 |
-| --- | --- |
-| `internal/proxy` | TLS 反代 Claude / OpenAI / Bedrock，解析 SSE 流增量计 token |
-| `internal/budget` | `TokenGroup` 递归树 + 单个仲裁 goroutine，负责准入 / 节流 / 抢占 |
-| `internal/store` | 内嵌 BoltDB，持久化窗口内 `consumed` 计数 + append-only 审计日志 |
-
-## 快速上手（10 分钟）
+需要 Go 1.24+。示例 go run 在内存中建立预算树，不启动 HTTP 服务、不调用模型、不写用户账本。
 
 ```bash
-git clone https://github.com/SuperMarioYL/tokenctl && cd tokenctl
-go build -o tokenctl ./cmd/tokenctl
-./tokenctl init --org acme && ./tokenctl up -c tokenctl.yaml
+git clone https://github.com/SuperMarioYL/tokenctl.git
+cd tokenctl
+go build -o bin/tokenctl ./cmd/tokenctl
 ```
 
-接着把 Claude Code 的 `ANTHROPIC_BASE_URL` 指向 `http://localhost:8080`，再开一个终端运行：
+## 快速开始
+
+给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。
 
 ```bash
-./tokenctl top -c tokenctl.yaml
+go run ./examples/presentation-demo
 ```
 
-你会立刻看到每个 dev 节点的 token 实时滚动、父级团队的剩余预算逐秒下跌。详细步骤见 [docs/quickstart.md](./docs/quickstart.md)。
+完整输入与执行步骤见上方命令及 [Demo 记录](docs/demo-results.json)。
 
-<details><summary>tokenctl top 示例输出</summary>
-
-```
-tokenctl top  2026-06-05T03:42:11Z  in-flight=1  throttles=0  denies=0  preempts=0
-wallet: [██······························]  (4.2k / 20.00M = 0%)
-────────────────────────────────────────────────────────────────────────────────
-GROUP                             WEIGHT  USAGE       BUDGET      STATE
-acme                              100     4.2k        20.00M      ok (0%)
-acme.team-platform                50      4.2k        10.00M      ok (0%)
-acme.team-platform.alice          50      4.2k        5.00M       ok (0%)
-acme.team-product                 30      0           6.00M       ok (0%)
-acme.team-research                20      0           4.00M       ok (0%)
-```
-
-</details>
-
-## <img src="https://api.iconify.design/tabler/photo.svg?color=%235e5ce6" width="20" height="20" align="center" /> 演示
-
-![tokenctl demo](./assets/demo.gif)
-
-构建二进制、生成示例预算树、启动反代，然后在 `tokenctl top` 里实时看到每个流式 token 被归账到正确的 `org → team → dev` leaf。录制脚本见 [`docs/demo.tape`](./docs/demo.tape)，由 CI [`.github/workflows/demo.yml`](./.github/workflows/demo.yml) 渲染。
-
-没有外部 DB、没有消息队列、没有第二个进程。一份 YAML，一个二进制，一个 BoltDB 文件。
-
-## 配置说明
-
-完整示例见 [`configs/tokenctl.example.yaml`](./configs/tokenctl.example.yaml)。核心字段：
-
-| 字段 | 类型 | 默认值 | 含义 |
-| --- | --- | --- | --- |
-| `listen` | string | `:8080` | 反代监听地址 |
-| `tls.cert_file` / `tls.key_file` | string | 空 | 本地终结 TLS；留空为明文 HTTP |
-| `store.path` | string | `tokenctl.db` | BoltDB 文件，相对路径基于 yaml 所在目录 |
-| `metrics.listen` | string | `:9090` | Prometheus 抓取端 |
-| `wallet.budget` | object | 空 | 跨多个 provider 的统一上限（一份钱包） |
-| `providers[]` | list | 必填 | `claude` / `openai` / `bedrock`（后者需 `region`） |
-| `tree` | object | 必填 | `org → team → dev` 递归预算树根节点 |
-| `tree.weight` | int | 必填 | 节点在父节点 slack 内的相对权重 |
-| `tree.budget.tokens` | int | 可选 | 该节点窗口内硬上限 |
-| `tree.budget.window` | duration | 必填 | Go duration（`1h` / `24h` / `720h`） |
-| `tree.budget.soft_throttle_at` | float ∈ (0,1] | `0.8` | 软节流触发比例 |
-| `api_keys[]` | list | 必填 | 把入站 Bearer token 绑定到 leaf 路径 |
-
-## 对比 chrome-devtools-mcp
-
-[`ChromeDevTools/chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) 让 Agent 拥有更强的工具能力，tokenctl 让平台团队拥有控制能力。两者解决的是同一条管线上的不同环节：
-
-| 维度 | chrome-devtools-mcp | tokenctl |
-| --- | --- | --- |
-| 关注层级 | Agent 调用浏览器调试器 | Agent 消耗 token 的预算与抢占 |
-| 部署形态 | npm / MCP server，跟随 Agent 进程 | 独立反代，平台侧统一治理 |
-| 调试体验 | ✓ 远比 tokenctl 强 | — 不涉及 |
-| 跨 provider 钱包 | — | ✓ Claude + OpenAI + Bedrock 一张账单 |
-| 在线抢占（kill mid-stream） | — | ✓ 高权重兄弟节点缺粮时取消在飞的低权重上游请求（客户端收到 `499` + `X-TokenCtl-Reason: preempted_by_sibling`） |
-| 软节流 + 硬拒绝 | — | ✓ 80% FIFO 排队 / 100% 429 |
-
-实事求是地讲：`chrome-devtools-mcp` 在它的本职上比 tokenctl 强得多，二者通常是**配套部署**而不是替代关系——Agent 由它增强，token 由我们仲裁。
-
-## 付费 / Pricing
-
-OSS 二进制（Apache-2.0）永久免费。**托管控制面（Hosted Control Plane）** 面向需要采购流程的平台团队：
-
-| 套餐 | 适合 | 价格 |
-| --- | --- | --- |
-| **OSS 自部署** | 1–500 个被治理席位 | 免费 |
-| **Hosted Pro** | Series B/C，多区域 HA，SSO / SCIM，90 天审计留存，Slack / PagerDuty 告警 | **\$1,500 / 月** 起，含 500 席；额外 \$3 / 席 / 月 |
-| **Hosted Enterprise** | 大型平台团队，私有部署支持，SOC2 路径 | 走单 |
-
-锚点参考：Simon Willison 写的 \$1,500/月「单个开发者上限」——我们把这个数字搬到「钱包整体下限」上。
-
-➡ 想 30 分钟内拿到一个跑在 us-east-1 的托管 endpoint？写信到 [leo.stack@outlook.com](mailto:leo.stack@outlook.com)。
-
-## 路线图
-
-- [x] **m1 — `proxy_meter`**：反代 + SSE 增量 token 归账 + `/metrics` + `tokenctl top` 实时视图
-- [x] **m2 — `tree_weight`**：YAML 预算树 + 软节流（80%）+ 硬拒绝（429 + `X-TokenCtl-Reason`）
-- [x] **m3 — `preempt_arb`**：在线抢占 + 跨 provider 钱包仲裁（Claude + OpenAI + Bedrock 一份钱）
-- [ ] **m4** — 托管控制面 GA（Fly.io 多区域 + Stripe Billing + WorkOS SSO）
-- [ ] **m5** — Web UI（只读视图先行，写入仍走 YAML + Git）
-- [ ] **m6** — Anthropic Workspaces / LangSmith 计费 webhook 集成
-
-## 开源协议与贡献
-
-Apache-2.0。详见 [LICENSE](./LICENSE)。
-
-提 Bug 或想法请在 [GitHub Issues](https://github.com/SuperMarioYL/tokenctl/issues) 开一张；PR 之前烦请先开一个 Issue 对齐方向。中文沟通完全 OK。
-
-推送代码后，记得给仓库加上 topic 方便被搜索到：
+## 使用
 
 ```bash
-gh repo edit --add-topic mcp --add-topic agent --add-topic claude-code --add-topic llm-budget
+./bin/tokenctl init --org acme
+./bin/tokenctl up -c tokenctl.yaml
+# 在另一个终端：
+./bin/tokenctl top -c tokenctl.yaml --once
+```
+启动前编辑 providers、api_keys 和预算值，并使用真实上游接受的鉴权配置。客户端要把请求路由到代理；只启动服务不会产生计数。软节流返回带 Retry-After 的 429，硬拒绝返回 budget_exceeded；进行中的流已发响应头时不能再改 HTTP 状态。
+
+## 实际 Demo
+
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/process-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/process-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/process-dark.svg">
+  <img src="assets/presentation/process-light.svg" width="1000" alt="给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。">
+</picture>
+
+### 用完预算后拒绝准入
+
+首次请求完成归账后，下一次返回 budget exceeded。
+
+```text
+$ go run ./examples/presentation-demo
+{
+  "budget_tokens": 10,
+  "group": "demo.developer",
+  "next_request_denied": true,
+  "reason": "tokenctl: budget exceeded",
+  "supplied_input_tokens": 3,
+  "supplied_output_tokens": 7
+}
 ```
 
-## 分享一下
+## 能力与接入
 
-```
-tokenctl —— 给 Claude Code 装上 cgroups。
-一份 YAML 描述 org→team→dev 预算树，反代 Claude/OpenAI/Bedrock，
-越线 429，缺粮抢占。一个 Go 二进制，工程团队真能装上。
-👉 https://github.com/SuperMarioYL/tokenctl
-```
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/integrations-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/integrations-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/integrations-dark.svg">
+  <img src="assets/presentation/integrations-light.svg" width="1000" alt="CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。">
+</picture>
+
+CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。
+
+
+
+## 配置
+
+完整示例见 [tokenctl.example.yaml](configs/tokenctl.example.yaml)。tree 定义 name/weight/budget/children，api_keys 绑定 leaf；wallet 提供总上限。model_tiers 支持模型名正则、cost_multiplier 和层级预算；reset_policy 支持 hard/rollover/grace。pricing 供 export 估算费用。store.path 相对配置目录解析；TLS、listen 与 metrics 配置服务地址。
+
+## 路线图与范围
+
+当前包含预算树、预留、模型层级、重置策略、代理计量与审计导出。托管控制面、团队 SSO 和供应商账单自动对接属于后续方向。
+
+- 计量依赖上游协议和 usage 字段；token 额度与实际货币费用不同，不能把示例数字当作账单。
+- 本示例未验证 SSE 计量、在线抢占或真实供应商连接；这些需要各自环境的接入验证。
+
+![Terminal recording](assets/demo.gif) · [Recording script](docs/demo.tape)
+
+## 许可证
+
+[Apache-2.0](LICENSE)

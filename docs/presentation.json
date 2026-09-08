@@ -1,0 +1,82 @@
+{
+  "name": "tokenctl",
+  "tagline": "Put model traffic under explicit budgets.",
+  "architecture": {
+    "title": "tokenctl / data flow",
+    "nodes": [
+      {
+        "title": "Proxy request",
+        "detail": "Key / provider / model"
+      },
+      {
+        "title": "Budget tree",
+        "detail": "Admission / reservation / limits"
+      },
+      {
+        "title": "Usage attribution",
+        "detail": "Input and output deltas"
+      },
+      {
+        "title": "Store and metrics",
+        "detail": "BoltDB / Prometheus / exports"
+      }
+    ],
+    "edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  "process": {
+    "title": "tokenctl / example workflow",
+    "steps": [
+      {
+        "title": "Build a small tree",
+        "detail": "10-token ceiling"
+      },
+      {
+        "title": "Admit and attribute",
+        "detail": "3 input + 7 output"
+      },
+      {
+        "title": "Try another request",
+        "detail": "Budget exceeded"
+      }
+    ],
+    "result": "The production budget tree rejects the next admission after ten supplied usage units."
+  },
+  "integrations": {
+    "title": "tokenctl / supported routes",
+    "items": [
+      {
+        "title": "Claude / OpenAI",
+        "detail": "Supported response metering paths"
+      },
+      {
+        "title": "Bedrock adapter",
+        "detail": "Provider-specific transport surface"
+      },
+      {
+        "title": "YAML budget tree",
+        "detail": "Weights / windows / leaf keys"
+      },
+      {
+        "title": "BoltDB",
+        "detail": "Counters and audit events"
+      },
+      {
+        "title": "Metrics and export",
+        "detail": "Status / reconciliation data"
+      }
+    ]
+  }
+}

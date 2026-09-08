@@ -1,0 +1,17 @@
+{
+  "version": "0.15.0",
+  "scope": "Production hierarchical budget admission and accounting with explicitly supplied synthetic counters (3 input + 7 output against a 10-token budget). No proxy stream, external provider or actual billing is exercised.",
+  "inputs": [
+    {
+      "path": "examples/presentation-demo/main.go",
+      "sha256": "d8cfbfe8c73d354699c5f2776211678e0fdb34c5ee77a26d79df0840582b3a2e"
+    }
+  ],
+  "steps": [
+    {
+      "command": "go run ./examples/presentation-demo",
+      "output": "{\n  \"budget_tokens\": 10,\n  \"group\": \"demo.developer\",\n  \"next_request_denied\": true,\n  \"reason\": \"tokenctl: budget exceeded\",\n  \"supplied_input_tokens\": 3,\n  \"supplied_output_tokens\": 7\n}\n",
+      "exit_code": 0
+    }
+  ]
+}

@@ -1,72 +1,236 @@
 {
-  "schema": 1,
+  "schema": 3,
   "name": "tokenctl",
   "github": "https://github.com/SuperMarioYL/tokenctl",
   "host": "tokenctl.lei6393.com",
-  "meta": { "content_version": "0.15.0" },
-  "lang": { "primary": "zh", "toggle": true },
-  "accent": ["#14b8a6", "#0d9488", "#0f766e"],
+  "palette": "auto",
+  "lang": {
+    "primary": "zh",
+    "toggle": true
+  },
+  "meta": {
+    "visual_profile": "neon-particle",
+    "content_version": "0.15.0",
+    "demo_source": "docs/demo-results.json"
+  },
   "hero": {
-    "eyebrow": { "zh": "预算 · 刹车 · 对账", "en": "Budget · Brake · Reconcile" },
-    "headline": { "zh": "你的 AI 账单\n终于有了刹车", "en": "Your AI bill\nfinally has a brake" },
-    "sub": {
-      "zh": "CFO 把全公司的 AI 账单交给你？按团队、按人设硬上限：快到顶自动减速、超额直接拒掉、重要的人优先跑。贵的模型单独设限、月底导出对账表、没花完的额度滚到下个月——给平台 / DevEx 团队的真预算控制器。",
-      "en": "When the CFO hands you the whole company's AI bill, set hard ceilings per team and per dev: it auto-slows near the line, refuses past it, and lets the important people go first. Cap the expensive models separately, export a month-end reconciliation table, and roll unspent budget forward — a real budget controller for platform / DevEx teams."
+    "eyebrow": {
+      "zh": "为组织、团队和开发者配置 token 预算，通过反向代理归账、控制准入并提供运行指标。",
+      "en": "Configure organization, team and developer token budgets, attribute proxy usage, control admission and expose runtime metrics."
     },
-    "command": "./tokenctl up -c tokenctl.yaml",
-    "ctaGithub": { "zh": "在 GitHub 查看", "en": "View on GitHub" },
-    "scroll": { "zh": "向下滚动", "en": "Scroll" }
+    "headline": {
+      "zh": "把模型流量接到明确的预算规则上。",
+      "en": "Put model traffic under explicit budgets."
+    },
+    "sub": {
+      "zh": "为组织、团队和开发者配置 token 预算，通过反向代理归账、控制准入并提供运行指标。",
+      "en": "Configure organization, team and developer token budgets, attribute proxy usage, control admission and expose runtime metrics."
+    },
+    "href": "#quickstart",
+    "cta": {
+      "zh": "运行示例",
+      "en": "Run the example"
+    },
+    "ctaGithub": {
+      "zh": "查看源码",
+      "en": "View source"
+    }
+  },
+  "scene": {
+    "kind": "neon-graph",
+    "caption": {
+      "zh": "图示展示组件关系；实际输出见下方示例。",
+      "en": "An illustrative component scene; recorded output appears below."
+    },
+    "fallback": "/assets/presentation/scene-dark.svg",
+    "fallbackLight": "/assets/presentation/scene-light.svg"
   },
   "advantages": [
     {
-      "title": { "zh": "刹车，不只是账单", "en": "A brake, not just a bill" },
-      "body": {
-        "zh": "别的工具月底才送来一张账单——钱已经花完了。tokenctl 在每个请求发出去之前就按预算卡住：快到上限自动排队减速，超过直接拒掉，预算花不出去。",
-        "en": "Other tools hand you a bill at month's end — after the money's already gone. tokenctl checks every request against the budget before it leaves: queues and slows near the ceiling, refuses past it. The budget can't be blown."
+      "title": {
+        "zh": "按层次归账",
+        "en": "Hierarchical attribution"
       },
-      "chips": ["› 花前就拦", "› 越线即停"]
+      "body": {
+        "zh": "叶子与父级共享同一请求归属。",
+        "en": "Leaves and ancestors share request attribution."
+      }
     },
     {
-      "title": { "zh": "重要的事，先跑", "en": "Important work goes first" },
-      "body": {
-        "zh": "不是先到先得的死配额。当关键团队预算吃紧，tokenctl 会主动让掉手头不重要的在飞请求，把额度腾给更要紧的流量——关键发版不会被摸鱼请求拖死。",
-        "en": "Not a static first-come quota. When a critical team runs short, tokenctl yields the unimportant in-flight requests and hands the slack to the urgent traffic — so a critical rollout isn't starved by a trivial one."
+      "title": {
+        "zh": "明确准入规则",
+        "en": "Explicit admission"
       },
-      "chips": ["› 重要先跑", "› 主动让路"]
+      "body": {
+        "zh": "窗口、预留与上限决定是否接受请求。",
+        "en": "Windows, reservations and ceilings control admission."
+      }
     },
     {
-      "title": { "zh": "所有模型一个钱包，贵的单独设限", "en": "Every model, one wallet — expensive ones capped separately" },
-      "body": {
-        "zh": "不用在每个后台分别设上限、分别看账单。tokenctl 把公司用的所有 AI 流量汇成一份预算——一个总数管住所有模型。贵的模型（一次会话就是便宜模型的十倍花销）还能单独设一道上限，一次突击烧不掉整月的额度。",
-        "en": "No need to set separate ceilings in every console or juggle separate bills. tokenctl rolls all your company's AI traffic into one budget — one number governs every model. The expensive models (a single session can cost ten times the cheap ones) can take their own separate cap, so one runaway session can't quietly eat a whole month's headroom."
+      "title": {
+        "zh": "查看运行状态",
+        "en": "Inspect runtime state"
       },
-      "chips": ["› 一个总数", "› 多模型合一", "› 贵的单独设限"]
-    },
-    {
-      "title": { "zh": "没花完的额度，滚到下月", "en": "Unspent budget rolls into next month" },
       "body": {
-        "zh": "不用再让团队月底突击烧光预算凑满配额。每个节点都能滚存或留宽限：没花完的余量按你定的比例带进下个窗口当临时加成，先消耗再释放；也能给月初留一段宽限，不在切换的瞬间把流量掐断。",
-        "en": "Stop teams racing to burn through the budget at month-end just to fill the quota. Every node can roll over or grant a grace period: unspent balance rolls into the next window as a transient bump at a ratio you set, consumed first then released; or hold the old ceiling live for a grace period so traffic isn't cut off the instant the window flips."
-      },
-      "chips": ["› 余量滚存", "› 月初宽限"]
-    },
-    {
-      "title": { "zh": "一条命令，导出对账表", "en": "One command exports the reconciliation table" },
-      "body": {
-        "zh": "财务月底来问每个团队到底花了多少、按模型算多少钱？一条命令按月按团队按模型导出 CSV 或 JSON：用量配上一栏手算可验证的金额估算，直接拿去和供应商账单对账——不用再手动拼数字。",
-        "en": "When finance asks what each team actually spent last month, broken down by model in dollars, one command exports CSV or JSON by month, team, and model: usage paired with a hand-verifiable cost estimate column, ready to reconcile against the provider invoice — no more stitching numbers by hand."
-      },
-      "chips": ["› 按月按团队", "› CSV / JSON", "› 直接对账"]
+        "zh": "指标与审计导出辅助核对。",
+        "en": "Metrics and audit exports support reconciliation."
+      }
     }
   ],
-  "scene": { "kind": "hub-nodes", "nodes": ["Claude", "OpenAI", "Bedrock"] },
-  "cta": {
-    "headline": { "zh": "把公司的 AI 账单管起来", "en": "Take control of the company AI bill" },
-    "sub": {
-      "zh": "Apache-2.0 开源，不用搭数据库，也不起第二个进程。一份配置写好预算结构，把现有 agent 入口指过来就开始执行。",
-      "en": "Apache-2.0 licensed, no database to stand up and no second process to run. One config file describes the budget; point your existing agents at it and enforcement begins."
+  "story": {
+    "intro": {
+      "title": {
+        "zh": "解决什么问题",
+        "en": "The task it solves"
+      },
+      "body": {
+        "zh": "多位开发者共享模型额度时，需要知道请求归属以及什么时候应拒绝新请求。tokenctl 把入站 key 绑定到预算树叶子，将用量累计到父级，并支持共享钱包与模型层级限制。额度单位与费用估算分开配置。",
+        "en": "When developers share model capacity, operators need request attribution and an explicit point to reject new work. tokenctl binds inbound keys to budget-tree leaves, propagates usage to ancestors and supports a shared wallet plus model-tier limits. Budget units and cost estimates are configured separately."
+      }
     },
-    "button": { "zh": "在 GitHub 查看", "en": "View on GitHub" }
+    "sections": [
+      {
+        "title": {
+          "zh": "从输入到结果",
+          "en": "From input to result"
+        },
+        "body": {
+          "zh": "给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。",
+          "en": "Supply the production budget tree with explicit counters of 3 input and 7 output tokens, then try another admission at the 10-token ceiling. These numbers are example inputs, not measured model traffic."
+        },
+        "image": {
+          "light": "/assets/presentation/process-light.svg",
+          "dark": "/assets/presentation/process-dark.svg",
+          "alt": {
+            "zh": "给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。",
+            "en": "Supply the production budget tree with explicit counters of 3 input and 7 output tokens, then try another admission at the 10-token ceiling. These numbers are example inputs, not measured model traffic."
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "工作原理",
+          "en": "How it works"
+        },
+        "body": {
+          "zh": "配置加载器构建树，budget 给请求分配带预留额度的 Admission，proxy 转发并解析支持协议里的用量。AddInput/AddOutput 归账后，BoltDB 保存计数和审计事件；Prometheus、top 与 export 展示运行状态。抢占取消 admission 上下文，由代理处理上游中断。",
+          "en": "Configuration builds the tree and budget grants an Admission with reserved capacity. The proxy forwards traffic and parses usage from supported protocols. AddInput/AddOutput attribute counters; BoltDB persists counters and audit events. Prometheus, top and export expose state. Preemption cancels admission context for the proxy to interrupt upstream work."
+        },
+        "image": {
+          "light": "/assets/presentation/architecture-light.svg",
+          "dark": "/assets/presentation/architecture-dark.svg",
+          "alt": {
+            "zh": "配置加载器构建树，budget 给请求分配带预留额度的 Admission，proxy 转发并解析支持协议里的用量。AddInput/AddOutput 归账后，BoltDB 保存计数和审计事件；Prometheus、top 与 export 展示运行状态。抢占取消 admission 上下文，由代理处理上游中断。",
+            "en": "Configuration builds the tree and budget grants an Admission with reserved capacity. The proxy forwards traffic and parses usage from supported protocols. AddInput/AddOutput attribute counters; BoltDB persists counters and audit events. Prometheus, top and export expose state. Preemption cancels admission context for the proxy to interrupt upstream work."
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "能力与接入",
+          "en": "Capabilities and integration"
+        },
+        "body": {
+          "zh": "CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。",
+          "en": "The CLI provides init/up/top/export and the service exposes Prometheus metrics and snapshots. Provider adapter code and actual cloud-account authentication are separate requirements. This example calls the budget core only, without testing the proxy or provider connectivity."
+        },
+        "image": {
+          "light": "/assets/presentation/integrations-light.svg",
+          "dark": "/assets/presentation/integrations-dark.svg",
+          "alt": {
+            "zh": "CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。",
+            "en": "The CLI provides init/up/top/export and the service exposes Prometheus metrics and snapshots. Provider adapter code and actual cloud-account authentication are separate requirements. This example calls the budget core only, without testing the proxy or provider connectivity."
+          }
+        }
+      }
+    ],
+    "details": [
+      {
+        "title": {
+          "zh": "使用方式",
+          "en": "Usage"
+        },
+        "body": {
+          "zh": "CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。",
+          "en": "The CLI provides init/up/top/export and the service exposes Prometheus metrics and snapshots. Provider adapter code and actual cloud-account authentication are separate requirements. This example calls the budget core only, without testing the proxy or provider connectivity."
+        }
+      },
+      {
+        "title": {
+          "zh": "配置",
+          "en": "Configuration"
+        },
+        "body": {
+          "zh": "完整示例见 [tokenctl.example.yaml](configs/tokenctl.example.yaml)。tree 定义 name/weight/budget/children，api_keys 绑定 leaf；wallet 提供总上限。model_tiers 支持模型名正则、cost_multiplier 和层级预算；reset_policy 支持 hard/rollover/grace。pricing 供 export 估算费用。store.path 相对配置目录解析；TLS、listen 与 metrics 配置服务地址。",
+          "en": "See [tokenctl.example.yaml](configs/tokenctl.example.yaml). tree defines name/weight/budget/children and api_keys bind leaves; wallet supplies an aggregate ceiling. model_tiers supports model regexes, cost_multiplier and tier budgets; reset_policy supports hard/rollover/grace. pricing supplies export cost estimates. store.path is relative to the config directory; TLS, listen and metrics configure service addresses."
+        }
+      }
+    ]
   },
-  "footer": { "tag": { "zh": "开源 · Apache-2.0", "en": "Open source · Apache-2.0" } }
+  "demo": {
+    "title": {
+      "zh": "实际运行结果",
+      "en": "Actual demo output"
+    },
+    "note": {
+      "zh": "给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。",
+      "en": "Supply the production budget tree with explicit counters of 3 input and 7 output tokens, then try another admission at the 10-token ceiling. These numbers are example inputs, not measured model traffic."
+    },
+    "source": "https://github.com/SuperMarioYL/tokenctl/blob/main/docs/demo-results.json",
+    "steps": [
+      {
+        "label": {
+          "zh": "用完预算后拒绝准入",
+          "en": "Deny admission at the ceiling"
+        },
+        "body": {
+          "zh": "首次请求完成归账后，下一次返回 budget exceeded。",
+          "en": "After the first request’s usage is attributed, the next admission returns budget exceeded."
+        },
+        "command": "go run ./examples/presentation-demo",
+        "output": "{\n  \"budget_tokens\": 10,\n  \"group\": \"demo.developer\",\n  \"next_request_denied\": true,\n  \"reason\": \"tokenctl: budget exceeded\",\n  \"supplied_input_tokens\": 3,\n  \"supplied_output_tokens\": 7\n}\n",
+        "image": "/assets/presentation/demo-0-light.svg",
+        "imageDark": "/assets/presentation/demo-0-dark.svg"
+      }
+    ]
+  },
+  "quickstart": {
+    "title": {
+      "zh": "从完整输入开始",
+      "en": "Start with complete input"
+    },
+    "body": {
+      "zh": "需要 Go 1.24+。示例 go run 在内存中建立预算树，不启动 HTTP 服务、不调用模型、不写用户账本。",
+      "en": "Requires Go 1.24+. The go run example creates an in-memory budget tree without starting HTTP, calling a model or writing a user ledger."
+    },
+    "steps": [
+      {
+        "title": {
+          "zh": "安装",
+          "en": "Install"
+        },
+        "code": "git clone https://github.com/SuperMarioYL/tokenctl.git\ncd tokenctl\ngo build -o bin/tokenctl ./cmd/tokenctl"
+      },
+      {
+        "title": {
+          "zh": "运行自带示例",
+          "en": "Run the supplied example"
+        },
+        "code": "go run ./examples/presentation-demo"
+      }
+    ]
+  },
+  "limitations": [
+    {
+      "zh": "计量依赖上游协议和 usage 字段；token 额度与实际货币费用不同，不能把示例数字当作账单。",
+      "en": "Metering depends on upstream protocols and usage fields. Token budgets differ from monetary costs; example counters are not invoices."
+    },
+    {
+      "zh": "本示例未验证 SSE 计量、在线抢占或真实供应商连接；这些需要各自环境的接入验证。",
+      "en": "This example does not validate SSE metering, online preemption or live-provider connectivity; each needs integration validation in its environment."
+    }
+  ],
+  "footer": {
+    "tag": "0.15.0 · Go 1.24+ · Apache-2.0"
+  }
 }
