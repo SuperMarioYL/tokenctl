@@ -100,6 +100,8 @@ The CLI provides init/up/top/export and the service exposes Prometheus metrics a
 
 ## Configuration
 
+Concurrent admissions can exceed the configured budget because checking and reserving are separate operations. Until they are atomic, do not rely on tokenctl as a strict token cap for concurrent traffic.
+
 See [tokenctl.example.yaml](configs/tokenctl.example.yaml). tree defines name/weight/budget/children and api_keys bind leaves; wallet supplies an aggregate ceiling. model_tiers supports model regexes, cost_multiplier and tier budgets; reset_policy supports hard/rollover/grace. pricing supplies export cost estimates. store.path is relative to the config directory; TLS, listen and metrics configure service addresses.
 
 ## Roadmap and scope

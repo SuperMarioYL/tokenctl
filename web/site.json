@@ -234,6 +234,10 @@
   },
   "limitations": [
     {
+      "zh": "当前并发准入的预算检查与预留不是同一个原子操作，多个请求可能同时通过检查而超过额度。在修复前，不应将它用作并发流量的严格 token 上限。",
+      "en": "Concurrent admissions can exceed the configured budget because checking and reserving are separate operations. Until they are atomic, do not rely on tokenctl as a strict token cap for concurrent traffic."
+    },
+    {
       "zh": "计量依赖上游协议和 usage 字段；token 额度与实际货币费用不同，不能把示例数字当作账单。",
       "en": "Metering depends on upstream protocols and usage fields. Token budgets differ from monetary costs; example counters are not invoices."
     },

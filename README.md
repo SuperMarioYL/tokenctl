@@ -100,6 +100,8 @@ CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件
 
 ## 配置
 
+当前并发准入的预算检查与预留不是同一个原子操作，多个请求可能同时通过检查而超过额度。在修复前，不应将它用作并发流量的严格 token 上限。
+
 完整示例见 [tokenctl.example.yaml](configs/tokenctl.example.yaml)。tree 定义 name/weight/budget/children，api_keys 绑定 leaf；wallet 提供总上限。model_tiers 支持模型名正则、cost_multiplier 和层级预算；reset_policy 支持 hard/rollover/grace。pricing 供 export 估算费用。store.path 相对配置目录解析；TLS、listen 与 metrics 配置服务地址。
 
 ## 路线图与范围
