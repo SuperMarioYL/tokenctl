@@ -104,6 +104,10 @@
           "alt": {
             "zh": "给生产预算树显式注入 3 个输入和 7 个输出 token 计数，在 10-token 上限后尝试下一次准入。数字是示例输入，不是从实际模型流量计量所得。",
             "en": "Supply the production budget tree with explicit counters of 3 input and 7 output tokens, then try another admission at the 10-token ceiling. These numbers are example inputs, not measured model traffic."
+          },
+          "mobile": {
+            "light": "/assets/presentation/process-mobile-light.svg",
+            "dark": "/assets/presentation/process-mobile-dark.svg"
           }
         }
       },
@@ -122,6 +126,10 @@
           "alt": {
             "zh": "配置加载器构建树，budget 给请求分配带预留额度的 Admission，proxy 转发并解析支持协议里的用量。AddInput/AddOutput 归账后，BoltDB 保存计数和审计事件；Prometheus、top 与 export 展示运行状态。抢占取消 admission 上下文，由代理处理上游中断。",
             "en": "Configuration builds the tree and budget grants an Admission with reserved capacity. The proxy forwards traffic and parses usage from supported protocols. AddInput/AddOutput attribute counters; BoltDB persists counters and audit events. Prometheus, top and export expose state. Preemption cancels admission context for the proxy to interrupt upstream work."
+          },
+          "mobile": {
+            "light": "/assets/presentation/architecture-mobile-light.svg",
+            "dark": "/assets/presentation/architecture-mobile-dark.svg"
           }
         }
       },
@@ -140,6 +148,10 @@
           "alt": {
             "zh": "CLI 提供 init/up/top/export，服务公开 Prometheus 指标与快照。软件中的 provider 适配路径与实际云账户认证是分开的条件；本示例仅调用预算核心，不测试代理或任何供应商连接。",
             "en": "The CLI provides init/up/top/export and the service exposes Prometheus metrics and snapshots. Provider adapter code and actual cloud-account authentication are separate requirements. This example calls the budget core only, without testing the proxy or provider connectivity."
+          },
+          "mobile": {
+            "light": "/assets/presentation/integrations-mobile-light.svg",
+            "dark": "/assets/presentation/integrations-mobile-dark.svg"
           }
         }
       }
